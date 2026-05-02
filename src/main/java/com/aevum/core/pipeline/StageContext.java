@@ -1,27 +1,31 @@
 package com.aevum.core.pipeline;
 
 import com.aevum.core.domain.model.*;
-import com.aevum.core.engine.*;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Shared context across pipeline stages.
+ *
+ * FIX: Changed sharedData from HashMap to ConcurrentHashMap.
+ * Stages 3-5 run in parallel virtual threads and all call context.put() concurrently.
+ * HashMap is NOT thread-safe — ConcurrentHashMap is required here.
  */
 public class StageContext {
     private final EffectivePom effectivePom;
     private final Path buildOutput;
     private final List<String> entryPoints;
     private final boolean networkExposed;
-    private final Map<String, Object> sharedData;
+    private final ConcurrentHashMap<String, Object> sharedData;
 
     public StageContext(EffectivePom effectivePom, Path buildOutput,
                         List<String> entryPoints, boolean networkExposed) {
         this.effectivePom = effectivePom;
         this.buildOutput = buildOutput;
-        this.entryPoints = List.copyOf(entryPoints);
+        this.entryPoints = List.copyOf(entryPoints != null ? entryPoints : List.of());
         this.networkExposed = networkExposed;
-        this.sharedData = new HashMap<>();
+        this.sharedData = new ConcurrentHashMap<>();
     }
 
     public EffectivePom getEffectivePom() { return effectivePom; }

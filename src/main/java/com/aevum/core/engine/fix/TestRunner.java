@@ -1,5 +1,7 @@
 package com.aevum.core.engine.fix;
 
+import org.springframework.stereotype.Component;
+
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -9,6 +11,7 @@ import java.util.List;
 /**
  * Executes tests by invoking Maven test goal and parses basic surefire output (best-effort).
  */
+@Component
 public class TestRunner {
 
     public static final class TestFailure {

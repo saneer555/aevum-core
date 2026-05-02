@@ -1,5 +1,7 @@
 package com.aevum.core.engine.fix;
 
+import org.springframework.stereotype.Component;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -13,6 +15,7 @@ import java.util.stream.Collectors;
 /**
  * Executes Maven builds by shelling out to `mvn` available on PATH. Lightweight and has a timeout.
  */
+@Component
 public class MavenBuildExecutor {
 
     public static final class BuildResult {

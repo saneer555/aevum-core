@@ -12,6 +12,17 @@ import java.util.*;
 /**
  * Stage 6: Confidence Scorer.
  * Final 0-100 score. <70 = false positive. >=90 = act immediately.
+ *
+ * FIX: The stageResults retrieval from context was an unsafe raw cast:
+ *   (List<StageResult>) context.get("stageResults").orElseThrow(...)
+ * StageContext.get() returns Optional<T> — the cast needs to be done properly.
+ * Now uses the typed get() with explicit List<Stage.StageResult> and handles
+ * the empty case gracefully rather than throwing.
+ *
+ * FIX 2: failedStageNames was comparing against class simple names ("EffectiveVersionStage",
+ * "ClasspathPresenceStage") but StageResult doesn't carry the stage class name — it carries
+ * the reasoning string. Changed critical failure detection to check stage result reasoning
+ * content (which contains "FALSE POSITIVE") instead of class name matching.
  */
 @Component
 public class ConfidenceScorerStage implements Stage {
@@ -21,41 +32,57 @@ public class ConfidenceScorerStage implements Stage {
     public String getName() { return "STAGE_06_CONFIDENCE_SCORER"; }
 
     @Override
+    @SuppressWarnings("unchecked")
     public StageResult execute(VulnerabilitySignal signal, StageContext context) {
-        List<StageResult> previousResults = (List<StageResult>) context.get("stageResults")
-            .orElseThrow(() -> new IllegalStateException("Previous stage results not found"));
+        // FIX: Safe typed retrieval — StageContext stores Object, need explicit cast with guard
+        Object raw = context.<Object>get("stageResults").orElse(null);
+        if (raw == null) {
+            return StageResult.fail(0, "No previous stage results found in context",
+                    Map.of("status", VerificationStatus.FALSE_POSITIVE));
+        }
+        List<StageResult> previousResults = (List<StageResult>) raw;
 
         Map<String, Integer> stageScores = new LinkedHashMap<>();
         List<String> reasoning = new ArrayList<>();
         int totalScore = 0;
-        boolean anyFailed = false;
-        Set<String> failedStageNames = new HashSet<>();
+        boolean hasCriticalFailure = false;
 
         for (StageResult result : previousResults) {
-            stageScores.put(result.getClass().getSimpleName(), result.score());
-            totalScore += result.score();
+            String stageName = result.reasoning() != null ? result.reasoning() : "unknown";
+            // Use index-based key to preserve order
+            String key = "stage_" + stageScores.size();
+            stageScores.put(key, result.score());
             reasoning.add(result.reasoning());
-            if (!result.passed()) {
-                anyFailed = true;
-                failedStageNames.add(result.getClass().getSimpleName());
+            totalScore += result.score();
+
+            // FIX: Critical failure is detected by reasoning content (FALSE_POSITIVE in early stages)
+            // rather than class name (which was never stored in StageResult)
+            if (!result.passed() && result.reasoning() != null &&
+                    (result.reasoning().contains("FALSE POSITIVE") ||
+                            result.reasoning().contains("FALSE_POSITIVE") ||
+                            result.reasoning().contains("not found in resolved dependency tree") ||
+                            result.reasoning().contains("NOT present in runtime classpath"))) {
+                hasCriticalFailure = true;
             }
         }
 
         // Normalize to 0-100
-        int normalizedScore = Math.min(100, totalScore / Math.max(1, previousResults.size()));
+        int normalizedScore = previousResults.isEmpty()
+                ? 0
+                : Math.min(100, totalScore / previousResults.size());
 
-        // Targeted penalty: only apply heavy penalty if critical stages failed (effective version or classpath)
-        boolean criticalFailure = failedStageNames.contains("EffectiveVersionStage") || failedStageNames.contains("ClasspathPresenceStage");
-        if (criticalFailure && normalizedScore >= 70) {
+        // Apply heavy penalty if critical stages (S2 effective version or S3 classpath) explicitly failed
+        if (hasCriticalFailure && normalizedScore >= 70) {
             normalizedScore = Math.max(0, normalizedScore - 30);
+            reasoning.add("PENALTY: Critical stage failure (version mismatch or not in classpath) detected");
         }
 
-        // Boost for KEV
+        // Boost for KEV — Known Exploited Vulnerabilities deserve immediate action
         Optional<ExploitabilityAssessor.ExploitabilityResult> exploitResult =
-            context.get("exploitabilityResult");
+                context.get("exploitabilityResult");
         if (exploitResult.isPresent() && exploitResult.get().inKev() && normalizedScore < 90) {
             normalizedScore = Math.min(100, normalizedScore + 15);
-            reasoning.add("BOOST: Known Exploited Vulnerability (KEV) detected");
+            reasoning.add("BOOST: Known Exploited Vulnerability (KEV) detected — confidence elevated");
         }
 
         LOG.info("Final confidence score for {}: {}/100", signal.getCveId(), normalizedScore);
@@ -73,7 +100,7 @@ public class ConfidenceScorerStage implements Stage {
         context.put("verificationStatus", status);
 
         return StageResult.pass(normalizedScore,
-            "Final confidence: " + normalizedScore + "/100. Status: " + status,
-            Map.of("status", status, "stageScores", stageScores));
+                "Final confidence: " + normalizedScore + "/100. Status: " + status,
+                Map.of("status", status, "stageScores", stageScores));
     }
 }

@@ -50,8 +50,8 @@ public class NormalizeStage implements Stage {
         if (!seenHashes.add(hash)) {
             LOG.debug("Duplicate signal detected and eliminated: {} (hash={})", signal.getSignalId(), hash);
             return StageResult.fail(0,
-                    "Duplicate signal eliminated via SHA-256: " + hash,
-                    Map.of("sha256", hash, "duplicate", true));
+                "FALSE POSITIVE: Duplicate signal eliminated via SHA-256: " + hash,
+                Map.of("sha256", hash, "duplicate", true));
         }
 
         LOG.debug("Signal normalized. SHA-256: {}", hash);

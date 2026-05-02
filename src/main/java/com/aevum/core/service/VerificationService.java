@@ -72,7 +72,7 @@ public class VerificationService {
                 request.networkExposed());
 
         List<VulnerabilitySignal> signals = normalizeSignals(request);
-        List<VerificationResult> results = processSignalsConcurrently(signals, context);
+        List<VerificationResult> results = processSignalsConcurrently(signals, context, validateFixes);
 
         // Aggregate results by status
         List<ScanResponse.VulnerabilityResult> confirmed = new ArrayList<>();
@@ -119,12 +119,28 @@ public class VerificationService {
     }
 
     private List<VerificationResult> processSignalsConcurrently(List<VulnerabilitySignal> signals,
-                                                                StageContext context) {
+                                                                StageContext context,
+                                                                boolean validateFixes) {
         ExecutorService executor = Threading.newVirtualThreadPerTaskExecutor();
         try {
+            // Ensure a single per-scan dedup set is shared by all per-signal contexts.
+            // NormalizeStage expects the key "normalizeSeenHashes" to exist in the context
+            // and will create one if absent — proactively create it here so each
+            // per-signal context can reference the same Set instance.
+            java.util.Set<String> sharedSeen = java.util.concurrent.ConcurrentHashMap.newKeySet();
+            context.put("normalizeSeenHashes", sharedSeen);
             List<Future<VerificationResult>> futures = new ArrayList<>();
             for (VulnerabilitySignal signal : signals) {
-                futures.add(executor.submit(() -> pipeline.verify(signal, context)));
+                // Create a fresh StageContext per-signal to avoid cross-wiring mutable state
+                StageContext perSignalContext = new StageContext(
+                        context.getEffectivePom(), context.getBuildOutput(), context.getEntryPoints(), context.isNetworkExposed());
+                // propagate validateFixes setting
+                perSignalContext.put("validateFixes", validateFixes);
+                // Disable test-friendly EffectivePom fallback for production scans
+                perSignalContext.put("allowEffectivePomFallback", Boolean.FALSE);
+                // inject shared per-scan dedup set so NormalizeStage dedup works across signals
+                perSignalContext.put("normalizeSeenHashes", sharedSeen);
+                futures.add(executor.submit(() -> pipeline.verify(signal, perSignalContext)));
             }
 
             List<VerificationResult> results = new ArrayList<>();
@@ -181,22 +197,35 @@ public class VerificationService {
         Map<String, Artifact> resolved = new HashMap<>();
         List<DependencyNode> tree = new ArrayList<>();
 
+        // If the caller provided real POM content, populate resolved dependencies
+        // from the signals for synthetic testing convenience. If no POM content
+        // is provided (typical payload runs), DO NOT assume signals are project
+        // dependencies — leave resolved map empty so Stage 2 can detect NOT_FOUND.
+        boolean hasPomContent = request.pomContent() != null && !request.pomContent().isBlank();
         if (request.signals() != null) {
             for (ScanRequest.VulnerabilityInput sig : request.signals()) {
-                Artifact artifact = new Artifact(
-                        sig.groupId(), sig.artifactId(), sig.version(), Scope.COMPILE);
+                String ver = sig.version();
+                if (ver == null || ver.isBlank()) {
+                    LOG.debug("Skipping synthetic direct dependency for signal {} because version is missing: {}:{}",
+                            sig.cveId(), sig.groupId(), sig.artifactId());
+                    continue;
+                }
 
-                // FIX: Add to BOTH direct deps AND resolved map so BomResolver Rule 1 fires
-                directDeps.add(artifact);
-                resolved.put(artifact.getShortCoordinate(), artifact);
-                tree.add(DependencyNode.root(artifact));
+                Artifact artifact = new Artifact(
+                        sig.groupId(), sig.artifactId(), ver, Scope.COMPILE);
+
+                if (hasPomContent) {
+                    directDeps.add(artifact);
+                    resolved.put(artifact.getShortCoordinate(), artifact);
+                    tree.add(DependencyNode.root(artifact));
+                }
             }
         }
 
         return new EffectivePom(
                 request.projectId(),
-                directDeps,          // FIX: was always empty list
-                List.of(),           // No BOMs in synthetic mode
+                directDeps,
+                List.of(),
                 Map.of(),
                 resolved,
                 tree
@@ -208,6 +237,18 @@ public class VerificationService {
 
         List<VulnerabilitySignal> signals = new ArrayList<>();
         for (ScanRequest.VulnerabilityInput input : request.signals()) {
+            // Extract metadata like affectedRange from payload fields or description
+            Map<String, String> metadata = new HashMap<>();
+            if (input.vulnerableRange() != null && !input.vulnerableRange().isBlank()) {
+                metadata.put("affectedRange", input.vulnerableRange());
+            } else {
+                String desc = input.description() != null ? input.description() : "";
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("affectedRange\\s*[:=]\\s*([\\[\\(].*?[\\]\\)])", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(desc);
+                if (m.find()) {
+                    metadata.put("affectedRange", m.group(1).trim());
+                }
+            }
+
             signals.add(VulnerabilitySignal.builder()
                     .signalId(UUID.randomUUID().toString())
                     .scannerSource(input.scannerSource() != null ? input.scannerSource() : "unknown")
@@ -218,6 +259,7 @@ public class VerificationService {
                     .severity(input.severity())
                     .cvssScore(input.cvssScore())
                     .description(input.description())
+                    .metadata(metadata)
                     .build());
         }
         return signals;
@@ -226,6 +268,19 @@ public class VerificationService {
     // ── DTO Mappers ────────────────────────────────────────────────────────────
 
     private ScanResponse.VulnerabilityResult toDto(VerificationResult result) {
+        // Extract version conflict info from metadata if present
+        Object vc = result.getMetadata().getOrDefault("versionConflict", Map.of());
+        boolean conflictDetected = false;
+        List<String> conflictingPaths = List.of();
+        if (vc instanceof Map) {
+            Map<?,?> vm = (Map<?,?>) vc;
+            conflictDetected = Boolean.TRUE.equals(vm.get("conflictDetected"));
+            Object paths = vm.get("conflictingPaths");
+            if (paths instanceof List) {
+                conflictingPaths = ((List<?>) paths).stream().map(Object::toString).toList();
+            }
+        }
+
         return new ScanResponse.VulnerabilityResult(
                 result.getOriginalSignal() != null ? result.getOriginalSignal().getCveId() : "N/A",
                 result.getEffectiveArtifact() != null ? result.getEffectiveArtifact().getCoordinate() : "N/A",
@@ -235,6 +290,7 @@ public class VerificationService {
                 result.isInClasspath(),
                 result.isReachable(),
                 mapFixOptions(result.getFixOptions()),
+                new ScanResponse.VersionConflictResult(conflictDetected, conflictingPaths),
                 result.getStageLogs()
         );
     }
@@ -245,6 +301,17 @@ public class VerificationService {
                 .map(f -> extractProofId(f.getValidationLog()))
                 .filter(Objects::nonNull)
                 .findFirst().orElse(null);
+        Object vc = result.getMetadata().getOrDefault("versionConflict", Map.of());
+        boolean conflictDetected = false;
+        List<String> conflictingPaths = List.of();
+        if (vc instanceof Map) {
+            Map<?,?> vm = (Map<?,?>) vc;
+            conflictDetected = Boolean.TRUE.equals(vm.get("conflictDetected"));
+            Object paths = vm.get("conflictingPaths");
+            if (paths instanceof List) {
+                conflictingPaths = ((List<?>) paths).stream().map(Object::toString).toList();
+            }
+        }
 
         return new ScanResponse.ConfirmedVulnerability(
                 result.getOriginalSignal() != null ? result.getOriginalSignal().getCveId() : "N/A",
@@ -255,6 +322,7 @@ public class VerificationService {
                 result.isInClasspath(),
                 result.isReachable(),
                 mapFixOptions(result.getFixOptions()),
+                new ScanResponse.VersionConflictResult(conflictDetected, conflictingPaths),
                 proofId,
                 result.getStageLogs()
         );

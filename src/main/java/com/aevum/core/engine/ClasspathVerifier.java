@@ -26,41 +26,58 @@ public class ClasspathVerifier {
             return ClasspathCheckResult.notPresent("Build output does not exist: " + buildOutput);
         }
 
-        // Check 1: WEB-INF/lib for WAR files
-        Path webInfLib = buildOutput.resolve("WEB-INF/lib");
-        if (Files.exists(webInfLib)) {
-            Optional<Path> match = findJarInDirectory(webInfLib, artifact);
-            if (match.isPresent()) {
-                return ClasspathCheckResult.present("WEB-INF/lib", match.get().toString());
+        String jarName = artifact.getArtifactId() + "-" + artifact.getVersion() + ".jar";
+
+        List<Path> searchPaths = Arrays.asList(
+            buildOutput.resolve("dependency").resolve(jarName),
+            buildOutput.resolve(jarName),
+            buildOutput.getParent() != null ? buildOutput.getParent().resolve(jarName) : buildOutput.resolve(jarName),
+            buildOutput.resolve("classes"),
+            buildOutput.resolve("BOOT-INF/lib").resolve(jarName),
+            buildOutput.resolve("WEB-INF/lib").resolve(jarName)
+        );
+
+        for (Path p : searchPaths) {
+            try {
+                if (p != null && Files.exists(p)) {
+                    LOG.info("S3: Found JAR at {}", p);
+                    // Verify the JAR actually contains classes for the artifact
+                    if (Files.isRegularFile(p) && p.toString().endsWith(".jar")) {
+                        if (checkJarContains(p, artifact) || p.getFileName().toString().contains(artifact.getVersion())) {
+                            return ClasspathCheckResult.present("FILESYSTEM", p.toString());
+                        }
+                    } else {
+                        return ClasspathCheckResult.present("FILESYSTEM", p.toString());
+                    }
+                }
+            } catch (Exception e) {
+                LOG.warn("Error checking path {}", p, e);
             }
         }
 
-        // Check 2: Fat JAR (BOOT-INF/lib for Spring Boot)
-        Path bootInfLib = buildOutput.resolve("BOOT-INF/lib");
-        if (Files.exists(bootInfLib)) {
-            Optional<Path> match = findJarInDirectory(bootInfLib, artifact);
-            if (match.isPresent()) {
-                return ClasspathCheckResult.present("BOOT-INF/lib", match.get().toString());
-            }
-        }
-
-        // Check 3: Direct JAR output
-        if (buildOutput.toString().endsWith(".jar")) {
-            boolean contains = checkJarContains(buildOutput, artifact);
-            if (contains) {
-                return ClasspathCheckResult.present("FAT_JAR", buildOutput.toString());
-            }
-        }
-
-        // Check 4: Maven target/classes or module path
+        // Also check exploded classes folder for presence of the package
         Path classesDir = buildOutput.resolve("classes");
         if (Files.exists(classesDir)) {
             boolean found = checkClassesDirectory(classesDir, artifact);
             if (found) {
+                LOG.info("S3: Found classes under {}", classesDir);
                 return ClasspathCheckResult.present("CLASSES_DIR", classesDir.toString());
             }
         }
 
+        // Check local maven repository
+        Path mavenLocal = Paths.get(System.getProperty("user.home"), ".m2/repository",
+            artifact.getGroupId().replace('.', '/'),
+            artifact.getArtifactId(),
+            artifact.getVersion(),
+            jarName);
+
+        if (Files.exists(mavenLocal)) {
+            LOG.info("S3: Found JAR in Maven local repo at {}", mavenLocal);
+            return ClasspathCheckResult.present("M2_LOCAL", mavenLocal.toString());
+        }
+
+        LOG.info("S3: JAR NOT FOUND for {}", artifact.getCoordinate());
         return ClasspathCheckResult.notPresent("Artifact not found in any classpath location");
     }
 

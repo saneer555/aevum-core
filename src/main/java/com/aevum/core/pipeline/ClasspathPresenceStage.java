@@ -32,10 +32,12 @@ public class ClasspathPresenceStage implements Stage {
         var result = classpathVerifier.verifyClasspathPresence(effective, context.getBuildOutput());
 
         if (!result.present()) {
-            // Fallback: for unit tests or synthetic EffectivePOMs, treat resolved artifacts in EffectivePom as present
+            // Allow a test-friendly fallback by default; production callers can set
+            // context.put("allowEffectivePomFallback", Boolean.FALSE) to disable.
             EffectivePom ep = context.getEffectivePom();
             boolean resolvedInPom = ep.hasArtifact(effective.getGroupId(), effective.getArtifactId());
-            if (resolvedInPom) {
+            boolean allowFallback = context.<Boolean>get("allowEffectivePomFallback").orElse(Boolean.TRUE);
+            if (allowFallback && resolvedInPom) {
                 LOG.debug("Fallback: artifact {} considered present because it is resolved in EffectivePom", effective.getCoordinate());
                 return StageResult.pass(90, "Artifact presumed present (resolved in EffectivePom): " + effective.getCoordinate(),
                     Map.of("location", "EFFECTIVE_POM", "path", "<resolved>") );

@@ -168,42 +168,56 @@ public class FixValidator {
      * making failures very hard to diagnose.
      */
     private void copyDirectory(Path src, Path dest) throws IOException {
-        Files.walkFileTree(src, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                Files.createDirectories(dest.resolve(src.relativize(dir)));
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                Files.copy(file, dest.resolve(src.relativize(file)),
-                        StandardCopyOption.REPLACE_EXISTING);
-                return FileVisitResult.CONTINUE;
-            }
-
-            @Override
-            public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                // Log and continue — don't abort copy for non-critical files
-                return FileVisitResult.CONTINUE;
-            }
-        });
+        Files.walkFileTree(src, new CopyVisitor(src, dest));
     }
 
     private void deleteDirectory(Path dir) throws IOException {
         if (!Files.exists(dir)) return;
-        Files.walkFileTree(dir, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                Files.deleteIfExists(file);
-                return FileVisitResult.CONTINUE;
-            }
+        Files.walkFileTree(dir, new DeleteVisitor(dir));
+    }
 
-            @Override
-            public FileVisitResult postVisitDirectory(Path directory, IOException exc) throws IOException {
-                Files.deleteIfExists(directory);
-                return FileVisitResult.CONTINUE;
-            }
-        });
+    private static final class CopyVisitor extends SimpleFileVisitor<Path> {
+        private final Path src;
+        private final Path dest;
+
+        CopyVisitor(Path src, Path dest) {
+            this.src = src;
+            this.dest = dest;
+        }
+
+        @Override
+        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+            Files.createDirectories(dest.resolve(src.relativize(dir)));
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+            Files.copy(file, dest.resolve(src.relativize(file)), StandardCopyOption.REPLACE_EXISTING);
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult visitFileFailed(Path file, IOException exc) {
+            return FileVisitResult.CONTINUE;
+        }
+    }
+
+    private static final class DeleteVisitor extends SimpleFileVisitor<Path> {
+        private final Path root;
+
+        DeleteVisitor(Path root) { this.root = root; }
+
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+            Files.deleteIfExists(file);
+            return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult postVisitDirectory(Path directory, IOException exc) throws IOException {
+            Files.deleteIfExists(directory);
+            return FileVisitResult.CONTINUE;
+        }
     }
 }

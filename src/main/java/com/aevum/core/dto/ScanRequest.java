@@ -19,6 +19,8 @@ public record ScanRequest(
         String groupId,
         String artifactId,
         String version,
+        String vulnerableRange,
+        List<String> safeVersions,
         String severity,
         double cvssScore,
         String description

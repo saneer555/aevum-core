@@ -1,0 +1,93 @@
+{
+  "projectId": "aevum-core-integration-test",
+  "pomContent": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<project xmlns=\"http://maven.apache.org/POM/4.0.0\"\n         xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n         xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0\n                             http://maven.apache.org/xsd/maven-4.0.0.xsd\">\n    <modelVersion>4.0.0</modelVersion>\n\n    <groupId>com.aevum</groupId>\n    <artifactId>aevum-core</artifactId>\n    <version>1.0.0</version>\n    <packaging>jar</packaging>\n\n    <name>Aevum Core</name>\n    <description>Deterministic Vulnerability Verification &amp; Remediation Engine</description>\n\n    <properties>\n        <!-- Downgrade to Java 17 for broader CI compatibility; virtual-thread usage is provided via a compatibility shim -->\n        <java.version>17</java.version>\n        <maven.compiler.source>17</maven.compiler.source>\n        <maven.compiler.target>17</maven.compiler.target>\n        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>\n        <spring-boot.version>3.2.5</spring-boot.version>\n        <graalvm.version>21.0.2</graalvm.version>\n    </properties>\n\n    <parent>\n        <groupId>org.springframework.boot</groupId>\n        <artifactId>spring-boot-starter-parent</artifactId>\n        <version>3.2.5</version>\n        <relativePath/>\n    </parent>\n\n    <dependencies>\n        <!-- Spring Boot -->\n        <dependency>\n            <groupId>org.springframework.boot</groupId>\n            <artifactId>spring-boot-starter</artifactId>\n        </dependency>\n        <dependency>\n            <groupId>org.springframework.boot</groupId>\n            <artifactId>spring-boot-starter-web</artifactId>\n        </dependency>\n        <dependency>\n            <groupId>org.springframework.boot</groupId>\n            <artifactId>spring-boot-starter-validation</artifactId>\n        </dependency>\n        <dependency>\n            <groupId>org.springframework.boot</groupId>\n            <artifactId>spring-boot-starter-actuator</artifactId>\n        </dependency>\n\n        <!-- Caffeine Cache (L1) -->\n        <dependency>\n            <groupId>com.github.ben-manes.caffeine</groupId>\n            <artifactId>caffeine</artifactId>\n            <version>3.1.8</version>\n        </dependency>\n\n        <!-- Jackson for JSON processing -->\n        <dependency>\n            <groupId>com.fasterxml.jackson.core</groupId>\n            <artifactId>jackson-databind</artifactId>\n        </dependency>\n        <dependency>\n            <groupId>com.fasterxml.jackson.dataformat</groupId>\n            <artifactId>jackson-dataformat-xml</artifactId>\n        </dependency>\n\n        <!-- Maven Resolver -->\n        <dependency>\n            <groupId>org.apache.maven</groupId>\n            <artifactId>maven-resolver-provider</artifactId>\n            <version>3.9.6</version>\n        </dependency>\n        <dependency>\n            <groupId>org.apache.maven.resolver</groupId>\n            <artifactId>maven-resolver-api</artifactId>\n            <version>1.9.18</version>\n        </dependency>\n        <dependency>\n            <groupId>org.apache.maven.resolver</groupId>\n            <artifactId>maven-resolver-impl</artifactId>\n            <version>1.9.18</version>\n        </dependency>\n        <dependency>\n            <groupId>org.apache.maven.resolver</groupId>\n            <artifactId>maven-resolver-connector-basic</artifactId>\n            <version>1.9.18</version>\n        </dependency>\n        <dependency>\n            <groupId>org.apache.maven.resolver</groupId>\n            <artifactId>maven-resolver-transport-file</artifactId>\n            <version>1.9.18</version>\n        </dependency>\n        <dependency>\n            <groupId>org.apache.maven.resolver</groupId>\n            <artifactId>maven-resolver-transport-http</artifactId>\n            <version>1.9.18</version>\n        </dependency>\n\n        <!-- ASM for bytecode analysis (reachability) -->\n        <dependency>\n            <groupId>org.ow2.asm</groupId>\n            <artifactId>asm</artifactId>\n            <version>9.6</version>\n        </dependency>\n        <dependency>\n            <groupId>org.ow2.asm</groupId>\n            <artifactId>asm-tree</artifactId>\n            <version>9.6</version>\n        </dependency>\n\n        <!-- Logging -->\n        <dependency>\n            <groupId>org.slf4j</groupId>\n            <artifactId>slf4j-api</artifactId>\n        </dependency>\n\n        <!-- Testing -->\n        <dependency>\n            <groupId>org.springframework.boot</groupId>\n            <artifactId>spring-boot-starter-test</artifactId>\n            <scope>test</scope>\n        </dependency>\n        <dependency>\n            <groupId>org.junit.jupiter</groupId>\n            <artifactId>junit-jupiter</artifactId>\n            <scope>test</scope>\n        </dependency>\n        <dependency>\n            <groupId>org.mockito</groupId>\n            <artifactId>mockito-core</artifactId>\n            <scope>test</scope>\n        </dependency>\n        <dependency>\n            <groupId>org.assertj</groupId>\n            <artifactId>assertj-core</artifactId>\n            <version>3.25.3</version>\n            <scope>test</scope>\n        </dependency>\n    </dependencies>\n\n    <build>\n        <plugins>\n            <plugin>\n                <groupId>org.springframework.boot</groupId>\n                <artifactId>spring-boot-maven-plugin</artifactId>\n                <configuration>\n                    <mainClass>com.aevum.core.AevumCoreApplication</mainClass>\n                </configuration>\n            </plugin>\n            <plugin>\n                <groupId>org.graalvm.buildtools</groupId>\n                <artifactId>native-maven-plugin</artifactId>\n                <version>0.10.1</version>\n                <configuration>\n                    <imageName>aevum-core</imageName>\n                    <mainClass>com.aevum.core.AevumCoreApplication</mainClass>\n                    <buildArgs>\n                        <buildArg>--no-fallback</buildArg>\n                        <buildArg>-O3</buildArg>\n                        <buildArg>--gc=epsilon</buildArg>\n                    </buildArgs>\n                </configuration>\n            </plugin>\n        </plugins>\n    </build>\n</project>",
+  "buildOutputPath": "C:\\Users\\sanee\\Downloads\\aevum-complete\\aevum-core\\target",
+  "entryPointClasses": ["com.aevum.core.AevumCoreApplication"],
+  "networkExposed": true,
+  "signals": [
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2021-44228",
+      "groupId": "org.apache.logging.log4j",
+      "artifactId": "log4j-core",
+      "version": "2.14.1",
+      "vulnerableRange": ">=2.14.0 <2.15.0",
+      "safeVersions": ["2.17.1", "2.20.0"],
+      "severity": "CRITICAL",
+      "cvssScore": 10.0,
+      "description": "Log4Shell test case"
+    },
+    {
+      "scannerSource": "sonatype",
+      "cveId": "CVE-2023-35116",
+      "groupId": "com.fasterxml.jackson.core",
+      "artifactId": "jackson-databind",
+      "version": "2.9.10",
+      "vulnerableRange": "<=2.9.10.8",
+      "safeVersions": ["2.12.0", "2.13.0"],
+      "severity": "HIGH",
+      "cvssScore": 7.5,
+      "description": "Jackson databind deserialization gadget test"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2023-44487",
+      "groupId": "io.netty",
+      "artifactId": "netty-codec-http2",
+      "version": "4.1.68.Final",
+      "vulnerableRange": ">=4.1.0 <4.1.70",
+      "safeVersions": ["4.1.72.Final"],
+      "severity": "HIGH",
+      "cvssScore": 7.0,
+      "description": "Netty missing artifact test (expect S2 NOT_FOUND if not in POM)"
+    },
+    {
+      "scannerSource": "custom",
+      "cveId": "CVE-2024-TEST01",
+      "groupId": "com.example",
+      "artifactId": "boundary-lib",
+      "version": "1.0.0",
+      "vulnerableRange": ">=1.0.0 <1.1.0",
+      "safeVersions": ["1.2.0"],
+      "severity": "MEDIUM",
+      "cvssScore": 5.0,
+      "description": "Example third-party lib not present"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2022-22965",
+      "groupId": "org.springframework.boot",
+      "artifactId": "spring-boot",
+      "version": "2.3.4",
+      "vulnerableRange": ">=2.0.0 <2.5.0",
+      "safeVersions": ["2.6.0", "2.7.0"],
+      "severity": "CRITICAL",
+      "cvssScore": 9.0,
+      "description": "Spring transitive resolution / BOM handling test"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2023-xxxx",
+      "groupId": "org.apache.commons",
+      "artifactId": "commons-lang3",
+      "version": "3.8",
+      "vulnerableRange": ">=3.0 <3.9",
+      "safeVersions": ["3.12.0"],
+      "severity": "LOW",
+      "cvssScore": 3.0,
+      "description": "Test BOM-managed version (should pick managed version if provided via pomContent)"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2024-TEST02",
+      "groupId": "org.example",
+      "artifactId": "unused-lib",
+      "version": "0.1.0",
+      "vulnerableRange": ">=0.0.1 <0.2.0",
+      "safeVersions": ["0.2.0"],
+      "severity": "MEDIUM",
+      "cvssScore": 4.5,
+      "description": "Library present in classpath but not invoked (S4 should mark not reachable)"
+    }
+  ]
+}

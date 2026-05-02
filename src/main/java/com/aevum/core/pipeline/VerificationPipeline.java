@@ -3,9 +3,11 @@ package com.aevum.core.pipeline;
 import com.aevum.core.domain.model.*;
 import com.aevum.core.domain.enums.VerificationStatus;
 import com.aevum.core.engine.*;
+import com.aevum.core.engine.fix.VersionConflictDetector;
 import com.aevum.core.util.Threading;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -37,7 +39,9 @@ public class VerificationPipeline {
     private final ConfidenceScorerStage confidenceScorerStage;
     private final BomResolver bomResolver;
     private final FixEngine fixEngine;
+    private final VersionConflictDetector conflictDetector;
 
+    @Autowired
     public VerificationPipeline(NormalizeStage normalizeStage,
                                 EffectiveVersionStage effectiveVersionStage,
                                 ClasspathPresenceStage classpathPresenceStage,
@@ -45,7 +49,8 @@ public class VerificationPipeline {
                                 ExploitabilityStage exploitabilityStage,
                                 ConfidenceScorerStage confidenceScorerStage,
                                 BomResolver bomResolver,
-                                FixEngine fixEngine) {
+                                FixEngine fixEngine,
+                                VersionConflictDetector conflictDetector) {
         this.normalizeStage = normalizeStage;
         this.effectiveVersionStage = effectiveVersionStage;
         this.classpathPresenceStage = classpathPresenceStage;
@@ -54,6 +59,24 @@ public class VerificationPipeline {
         this.confidenceScorerStage = confidenceScorerStage;
         this.bomResolver = bomResolver;
         this.fixEngine = fixEngine;
+        this.conflictDetector = conflictDetector;
+    }
+
+    /**
+     * Backwards-compatible constructor for tests and legacy callers that don't
+     * provide a VersionConflictDetector. Creates a default detector.
+     */
+    public VerificationPipeline(NormalizeStage normalizeStage,
+                                EffectiveVersionStage effectiveVersionStage,
+                                ClasspathPresenceStage classpathPresenceStage,
+                                RuntimeReachabilityStage runtimeReachabilityStage,
+                                ExploitabilityStage exploitabilityStage,
+                                ConfidenceScorerStage confidenceScorerStage,
+                                BomResolver bomResolver,
+                                FixEngine fixEngine) {
+        this(normalizeStage, effectiveVersionStage, classpathPresenceStage,
+                runtimeReachabilityStage, exploitabilityStage, confidenceScorerStage,
+                bomResolver, fixEngine, new VersionConflictDetector());
     }
 
     public VerificationResult verify(VulnerabilitySignal signal, StageContext context) {
@@ -156,16 +179,36 @@ public class VerificationPipeline {
 
         Artifact effectiveArtifact = context.<Artifact>get("effectiveArtifact").orElse(null);
         BomResolver.ResolutionResult resolution =
-                context.<BomResolver.ResolutionResult>get("resolutionResult").orElse(null);
+            context.<BomResolver.ResolutionResult>get("resolutionResult").orElse(null);
 
         RootCausePath rootCause = null;
         if (resolution != null && effectiveArtifact != null) {
             List<Artifact> path = resolution.isFound()
-                    ? List.of(new Artifact(signal.getGroupId(), signal.getArtifactId(),
-                    signal.getReportedVersion(), effectiveArtifact.getScope()))
-                    : List.of();
+                ? List.of(new Artifact(signal.getGroupId(), signal.getArtifactId(),
+                signal.getReportedVersion(), effectiveArtifact.getScope()))
+                : List.of();
             rootCause = new RootCausePath(path, effectiveArtifact,
-                    resolution.mediationRule(), resolution.depth());
+                resolution.mediationRule(), resolution.depth());
+        }
+
+        // Detect version conflicts for the effective artifact (if present)
+        Map<String, Object> versionConflictMap = Map.of();
+        if (effectiveArtifact != null) {
+            try {
+                List<VersionConflictDetector.VersionConflict> conflicts = conflictDetector.detectConflicts(context.getEffectivePom());
+                String coord = effectiveArtifact.getShortCoordinate();
+                Optional<VersionConflictDetector.VersionConflict> match = conflicts.stream()
+                        .filter(c -> c.coordinate.equals(coord))
+                        .findFirst();
+                if (match.isPresent()) {
+                    List<String> paths = match.get().paths.stream().map(p -> p.getPathString()).toList();
+                    versionConflictMap = Map.of("conflictDetected", true, "conflictingPaths", paths);
+                } else {
+                    versionConflictMap = Map.of("conflictDetected", false, "conflictingPaths", List.of());
+                }
+            } catch (Exception e) {
+                versionConflictMap = Map.of("conflictDetected", false, "conflictingPaths", List.of());
+            }
         }
 
         // Generate fixes ONLY for CONFIRMED vulnerabilities
@@ -181,7 +224,9 @@ public class VerificationPipeline {
                     .rootCausePath(rootCause)
                     .effectiveArtifact(effectiveArtifact)
                     .build();
-            fixes = fixEngine.generateFixes(interim, context.getEffectivePom());
+            // By default don't run expensive build+test validation in unit tests/environment
+            boolean validate = context.<Boolean>get("validateFixes").orElse(Boolean.FALSE);
+            fixes = fixEngine.generateFixes(interim, context.getEffectivePom(), validate);
         }
 
         long durationMs = System.currentTimeMillis() - startTime;
@@ -194,20 +239,25 @@ public class VerificationPipeline {
                         "stageResult_" + runtimeReachabilityStage.getName())
                 .map(Stage.StageResult::passed).orElse(false);
 
+        Map<String, Object> meta = new HashMap<>();
+        meta.put("durationMs", durationMs);
+        meta.put("stagesCompleted", stageResults.size());
+        meta.put("versionConflict", versionConflictMap);
+
         return VerificationResult.builder()
-                .resultId(UUID.randomUUID().toString())
-                .signalId(signal.getSignalId())
-                .originalSignal(signal)
-                .status(status)
-                .confidenceScore(confidence)
-                .rootCausePath(rootCause)
-                .effectiveArtifact(effectiveArtifact)
-                .isInClasspath(inClasspath)
-                .isReachable(isReachable)
-                .fixOptions(fixes)
-                .stageLogs(stageLogs)
-                .metadata(Map.of("durationMs", durationMs, "stagesCompleted", stageResults.size()))
-                .build();
+            .resultId(UUID.randomUUID().toString())
+            .signalId(signal.getSignalId())
+            .originalSignal(signal)
+            .status(status)
+            .confidenceScore(confidence)
+            .rootCausePath(rootCause)
+            .effectiveArtifact(effectiveArtifact)
+            .isInClasspath(inClasspath)
+            .isReachable(isReachable)
+            .fixOptions(fixes)
+            .stageLogs(stageLogs)
+            .metadata(meta)
+            .build();
     }
 
     private VerificationResult buildErrorResult(VulnerabilitySignal signal, List<String> stageLogs,

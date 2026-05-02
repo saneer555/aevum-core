@@ -70,13 +70,26 @@ public class FixEngine {
     }
 
     /**
+     * No-arg constructor provided for tests and legacy callers that instantiate
+     * FixEngine directly. It creates basic default collaborators.
+     */
+    public FixEngine() {
+        this(new SafeVersionFinder(new com.aevum.core.engine.version.MavenMetadataClient()),
+             new FixValidator(new com.aevum.core.engine.fix.MavenBuildExecutor(),
+                 new com.aevum.core.engine.fix.TestRunner(new com.aevum.core.engine.fix.MavenBuildExecutor()),
+                 new com.aevum.core.engine.proof.ProofPackageBuilder()),
+             new FixRankingService(),
+             new VersionConflictDetector());
+    }
+
+    /**
      * Generate, validate, and rank fix options for a confirmed vulnerability.
      *
      * @param result       the verified result (must be CONFIRMED)
      * @param effectivePom the resolved POM context
      * @return ranked list of validated fixes (empty if none pass validation)
      */
-    public List<FixOption> generateFixes(VerificationResult result, EffectivePom effectivePom) {
+    public List<FixOption> generateFixes(VerificationResult result, EffectivePom effectivePom, boolean validate) {
         if (result.getStatus() != VerificationStatus.CONFIRMED) {
             LOG.info("Skipping fix generation for non-confirmed vulnerability: {}", result.getSignalId());
             return Collections.emptyList();
@@ -120,19 +133,25 @@ public class FixEngine {
             return Collections.emptyList();
         }
 
-        // Validate all candidates in parallel (bounded by semaphore)
-        List<FixOption> validated = validateCandidatesInParallel(candidates, result);
+        // If validation is disabled, return candidate list (candidates already have validated=false)
+        List<FixOption> result2;
+        if (!validate) {
+            result2 = candidates;
+        } else {
+            // Validate all candidates in parallel (bounded by semaphore)
+            List<FixOption> validated = validateCandidatesInParallel(candidates, result);
 
-        if (validated.isEmpty()) {
-            LOG.warn("No candidates passed validation for: {}", vulnerable.getCoordinate());
-            return Collections.emptyList();
+            if (validated.isEmpty()) {
+                LOG.warn("No candidates passed validation for: {}", vulnerable.getCoordinate());
+                return Collections.emptyList();
+            }
+
+            // Rank and return
+            FixRankingService.RankedFixOptions ranked = fixRankingService.rankFixes(
+                    validated, vulnerable.getVersion());
+
+            result2 = ranked.getAllFixes();
         }
-
-        // Rank and return
-        FixRankingService.RankedFixOptions ranked = fixRankingService.rankFixes(
-                validated, vulnerable.getVersion());
-
-        List<FixOption> result2 = ranked.getAllFixes();
         LOG.info("Fix generation complete: {} validated fix(es) for {}",
                 result2.size(), vulnerable.getCoordinate());
         return result2;
@@ -235,7 +254,7 @@ public class FixEngine {
     private List<FixOption> validateCandidatesInParallel(List<FixOption> candidates,
                                                          VerificationResult result) {
         // Use virtual threads for parallel validation, bounded by semaphore
-        ExecutorService exec = Executors.newVirtualThreadPerTaskExecutor();
+        ExecutorService exec = com.aevum.core.util.Threading.newVirtualThreadPerTaskExecutor();
         try {
             List<CompletableFuture<Optional<FixOption>>> futures = candidates.stream()
                     .map(c -> CompletableFuture.supplyAsync(

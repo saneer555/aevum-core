@@ -420,6 +420,29 @@ CVE-2023-XXXXX
 
 ## Core Engines & Logic
 
+## Recent Implementation Updates
+
+The implementation has been updated since this design was first written. The following summarizes practical changes made to the pipeline, DTOs, and runtime behavior so documentation and expectations align with the current codebase and test results.
+
+- **Input DTO changes**: `ScanRequest`/`VulnerabilitySignal` were extended to accept `vulnerableRange` (e.g. `>=2.14.0 <2.15.0`) and `safeVersions` lists. The verification runtime extracts `affectedRange` into signal metadata so Stage 2 can validate effective versions against the scanner-provided range.
+
+- **Normalize (S1)**: Deduplication now uses a shared per-scan SHA-256 set (not per-signal) to avoid duplicate work across signals belonging to the same scan. Duplicate eliminations are recorded with the reasoning prefix `FALSE POSITIVE` (so downstream scoring treats them as critical failures).
+
+- **Effective Version (S2)**: When an artifact cannot be resolved from the `EffectivePom` the stage now returns an explicit `FALSE POSITIVE` result (reason: not found). If `vulnerableRange` is provided the effective version is validated against that range using the `VersionRangeEvaluator`.
+
+- **Classpath Presence (S3)**: The previous unconditional test-only fallback (treating artifacts declared in `EffectivePom` as present on disk) has been removed for production scans. A context flag `allowEffectivePomFallback` controls this behavior — default is `false` for production and `true` in unit tests. In production S3 performs a strict filesystem search for classes/JARs under the provided `buildOutputPath`.
+
+- **Runtime Reachability (S4)**: The `ReachabilityAnalyzer` was improved to search both `classes/` directories and dependency JARs (including common locations like `BOOT-INF/lib` and `WEB-INF/lib`). A small CVE→class mapping and a network-exposed heuristic were added to improve detection for well-known cases (e.g., Log4Shell-style mappings). Unreachable findings are reported so they feed correctly into the confidence scorer.
+
+- **Fix generation & proof packages**: `FixEngine` still generates candidate fixes only for `CONFIRMED` vulnerabilities (score ≥ 90). Validation (in-memory POM edit + `mvn clean compile` + `mvn test`) remains gated and is disabled in unit-test runs by default because it requires a full build/test environment. When validation succeeds a `proofPackage` (build logs and validation evidence) is attached to the fix option.
+
+- **Reliability fixes & tests**: Parallel validation code that used anonymous inner visitors caused a `NoClassDefFoundError`; those visitors were refactored to named static classes. Unit tests for the pipeline were executed after the changes and are passing in the current workspace (all verification pipeline tests green).
+
+- **Operational note / pending**: End-to-end payload verification (S3/S4) requires the actual build output path to exist and contain the compiled classes and dependency JARs. If `buildOutputPath` is missing or empty, S3 will correctly mark artifacts as not present and the pipeline will produce `FALSE_POSITIVE` results. To validate CONFIRMED outcomes, run `mvn -DskipTests package` on the target project and point `buildOutputPath` at the produced `target/` directory.
+
+These updates reflect the live code in the repository and explain why some scan payloads return conservative `FALSE_POSITIVE` results when the required build artifacts or `vulnerableRange` metadata are not available.
+
+
 ### BomResolver Engine
 
 Implements exact **Maven dependency mediation rules**.

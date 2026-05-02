@@ -58,6 +58,8 @@ public class CliRunner implements CommandLineRunner {
                     "org.apache.logging.log4j",
                     "log4j-core",
                     "2.14.1",
+                    null,
+                    List.of(),
                     "critical",
                     10.0,
                     "Log4Shell RCE vulnerability"
@@ -69,6 +71,8 @@ public class CliRunner implements CommandLineRunner {
                     "org.apache.tomcat.embed",
                     "tomcat-embed-core",
                     "9.0.50",
+                    null,
+                    List.of(),
                     "high",
                     7.5,
                     "Tomcat vulnerability"
@@ -80,6 +84,8 @@ public class CliRunner implements CommandLineRunner {
                     "org.bouncycastle",
                     "bcprov-jdk18on",
                     "1.80",
+                    null,
+                    List.of(),
                     "high",
                     8.2,
                     "Bouncy Castle cryptographic vulnerability"
@@ -91,6 +97,8 @@ public class CliRunner implements CommandLineRunner {
                     "org.mockito",
                     "mockito-core",
                     "4.0.0",
+                    null,
+                    List.of(),
                     "medium",
                     5.3,
                     "Mockito test dependency - not in production classpath"

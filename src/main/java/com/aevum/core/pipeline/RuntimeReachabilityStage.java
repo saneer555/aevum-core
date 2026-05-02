@@ -30,10 +30,10 @@ public class RuntimeReachabilityStage implements Stage {
             .orElseThrow(() -> new IllegalStateException("Effective artifact not set in context"));
 
         var result = reachabilityAnalyzer.analyzeReachability(
-            effective, context.getBuildOutput(), context.getEntryPoints());
+            effective, context.getBuildOutput(), context.getEntryPoints(), signal.getCveId(), context.isNetworkExposed());
 
         if (!result.reachable()) {
-            String reason = "Vulnerable code path NOT reachable from application entry points. " +
+            String reason = "FALSE POSITIVE: Vulnerable code path NOT reachable from application entry points. " +
                            "The library is present but the vulnerable classes (" +
                            result.vulnerableClasses().size() + ") are not invoked.";
             LOG.info(reason);

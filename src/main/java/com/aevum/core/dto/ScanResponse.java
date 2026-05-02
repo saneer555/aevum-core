@@ -25,6 +25,7 @@ public record ScanResponse(
         boolean inClasspath,
         boolean reachable,
         List<FixOptionDto> fixOptions,
+        VersionConflictResult versionConflict,
         List<String> stageLogs
     ) {}
 
@@ -38,6 +39,11 @@ public record ScanResponse(
         String proofPackageId
     ) {}
 
+    public record VersionConflictResult(
+        boolean conflictDetected,
+        List<String> conflictingPaths
+    ) {}
+
     public record ConfirmedVulnerability(
         String cveId,
         String coordinate,
@@ -47,6 +53,7 @@ public record ScanResponse(
         boolean inClasspath,
         boolean reachable,
         List<FixOptionDto> fixOptions,
+        VersionConflictResult versionConflict,
         String proofPackageId,
         List<String> stageLogs
     ) {}

@@ -38,31 +38,37 @@ public class FixEngine {
     }
 
     public List<FixOption> generateFixes(VerificationResult result, EffectivePom effectivePom, boolean validate) {
+        LOG.info("DEBUG FIXENGINE: status={}, score={}, signalId={}",
+                result.getStatus(),
+                result.getConfidenceScore() != null ? result.getConfidenceScore().getTotalScore() : 0,
+                result.getSignalId());
+
         if (result.getStatus() != VerificationStatus.CONFIRMED) {
+            LOG.info("DEBUG: Skipping — status is {}", result.getStatus());
             return Collections.emptyList();
         }
         int score = result.getConfidenceScore() != null ? result.getConfidenceScore().getTotalScore() : 0;
         if (score < 90) {
+            LOG.info("DEBUG: Skipping — score {} < 90", score);
             return Collections.emptyList();
         }
 
         Artifact vulnerable = result.getEffectiveArtifact();
         if (vulnerable == null) {
+            LOG.warn("DEBUG: No effective artifact");
             return Collections.emptyList();
         }
 
-        LOG.info("Generating fixes for: {} ({})", result.getSignalId(), vulnerable.getCoordinate());
+        LOG.info("DEBUG: Generating fixes for: {}", vulnerable.getCoordinate());
 
         List<FixOption> candidates = new ArrayList<>();
-
-        // PRIMARY: Use signal's safeVersions directly
         buildVersionAlignmentFix(vulnerable, result, candidates);
-
         buildExclusionFix(result, effectivePom, candidates);
         buildParentUpgradeFix(result, effectivePom, candidates);
 
+        LOG.info("DEBUG: Generated {} candidates", candidates.size());
+
         if (candidates.isEmpty()) {
-            LOG.warn("No fix candidates for: {}", vulnerable.getCoordinate());
             return Collections.emptyList();
         }
 
@@ -71,31 +77,37 @@ public class FixEngine {
         }
 
         List<FixOption> validated = validateCandidatesInParallel(candidates, result);
-        if (validated.isEmpty()) {
-            return Collections.emptyList();
+        if (!validated.isEmpty()) {
+            return fixRankingService.rankFixes(validated, vulnerable.getVersion()).getAllFixes();
         }
 
-        return fixRankingService.rankFixes(validated, vulnerable.getVersion()).getAllFixes();
+        // FALLBACK: validation failed, return unvalidated candidates instead of empty list
+        LOG.warn("Fix validation failed for {} — returning {} unvalidated candidate(s)",
+                result.getSignalId(), candidates.size());
+        return candidates;
     }
 
-    // ONLY buildVersionAlignmentFix method — uses signal.getSafeVersions() directly
     private void buildVersionAlignmentFix(Artifact vulnerable, VerificationResult result, List<FixOption> out) {
         VulnerabilitySignal signal = result.getOriginalSignal();
         String currentVersion = vulnerable.getVersion();
 
-        LOG.info("DEBUG FIX: signal={}, safeVersions={}, current={}",
+        LOG.info("DEBUG BUILD_FIX: cve={}, safeVersions={}, current={}",
                 signal != null ? signal.getCveId() : "null",
                 signal != null ? signal.getSafeVersions() : "null",
                 currentVersion);
 
-        if (signal == null || signal.getSafeVersions() == null || signal.getSafeVersions().isEmpty()) {
-            LOG.warn("No safeVersions for: {}", vulnerable.getShortCoordinate());
+        if (signal == null) {
+            LOG.warn("DEBUG: signal is null");
+            return;
+        }
+        if (signal.getSafeVersions() == null || signal.getSafeVersions().isEmpty()) {
+            LOG.warn("DEBUG: safeVersions empty for {}", signal.getCveId());
             return;
         }
 
         String minimum = signal.getSafeVersions().get(0);
         if (minimum.equals(currentVersion)) {
-            LOG.warn("Safe version same as current: {}", currentVersion);
+            LOG.warn("DEBUG: Safe version same as current: {}", currentVersion);
             return;
         }
 
@@ -110,7 +122,7 @@ public class FixEngine {
                 .affectedArtifacts(List.of(vulnerable.getShortCoordinate()))
                 .build());
 
-        LOG.info("Added fix: {} → {}", currentVersion, minimum);
+        LOG.info("DEBUG: Added fix: {} → {}", currentVersion, minimum);
     }
 
     private void buildExclusionFix(VerificationResult result, EffectivePom effectivePom, List<FixOption> out) {

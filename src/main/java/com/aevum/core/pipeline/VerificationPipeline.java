@@ -50,14 +50,11 @@ public class VerificationPipeline {
     }
 
     public VerificationResult verify(VulnerabilitySignal signal, StageContext context) {
-
         long startTime = System.currentTimeMillis();
-
         List<String> stageLogs = new ArrayList<>();
         List<Stage.StageResult> stageResults = new ArrayList<>();
 
         try {
-            // Stage 1
             Stage.StageResult s1 = normalizeStage.execute(signal, context);
             stageResults.add(s1);
             stageLogs.add("[S1] " + s1.reasoning());
@@ -65,7 +62,6 @@ public class VerificationPipeline {
                 return buildResult(signal, context, stageResults, stageLogs, startTime);
             }
 
-            // Stage 2
             Stage.StageResult s2 = effectiveVersionStage.execute(signal, context);
             stageResults.add(s2);
             stageLogs.add("[S2] " + s2.reasoning());
@@ -73,16 +69,16 @@ public class VerificationPipeline {
                 return buildResult(signal, context, stageResults, stageLogs, startTime);
             }
 
-            // Parallel stages 3–5
             ExecutorService executor = Threading.newVirtualThreadPerTaskExecutor();
+            Stage.StageResult s3, s4, s5;
             try {
                 Future<Stage.StageResult> f3 = executor.submit(() -> classpathPresenceStage.execute(signal, context));
                 Future<Stage.StageResult> f4 = executor.submit(() -> runtimeReachabilityStage.execute(signal, context));
                 Future<Stage.StageResult> f5 = executor.submit(() -> exploitabilityStage.execute(signal, context));
 
-                Stage.StageResult s3 = f3.get();
-                Stage.StageResult s4 = f4.get();
-                Stage.StageResult s5 = f5.get();
+                s3 = f3.get();
+                s4 = f4.get();
+                s5 = f5.get();
 
                 stageResults.add(s3);
                 stageResults.add(s4);
@@ -96,16 +92,15 @@ public class VerificationPipeline {
                 executor.shutdown();
             }
 
-            // Stage 6
             context.put("stageResults", stageResults);
             Stage.StageResult s6 = confidenceScorerStage.execute(signal, context);
-
             stageResults.add(s6);
             stageLogs.add("[S6] " + s6.reasoning());
 
             return buildResult(signal, context, stageResults, stageLogs, startTime);
 
         } catch (Exception e) {
+            LOG.error("Pipeline exception for signal {}: {}", signal.getSignalId(), e.getMessage(), e);
             stageLogs.add("[ERROR] " + e.getMessage());
             return buildErrorResult(signal, stageLogs, startTime, e);
         }
@@ -117,38 +112,69 @@ public class VerificationPipeline {
                                            List<String> stageLogs,
                                            long startTime) {
 
-        // ✅ FIX: Proper generic typing
-        ConfidenceScore confidence =
-                context.<ConfidenceScore>get("confidenceScore").orElse(null);
+        ConfidenceScore confidence = context.<ConfidenceScore>get("confidenceScore").orElse(null);
+        VerificationStatus status = context.<VerificationStatus>get("verificationStatus").orElse(null);
 
-        VerificationStatus status =
-                context.<VerificationStatus>get("verificationStatus").orElse(null);
-
-        // ✅ FIX: detect false positives via reasoning only
         if (status == null) {
             boolean hasFalsePositive = stageResults.stream()
                     .anyMatch(r -> r.reasoning() != null &&
                             r.reasoning().toLowerCase().contains("false positive"));
-
-            status = hasFalsePositive
-                    ? VerificationStatus.FALSE_POSITIVE
-                    : VerificationStatus.INCONCLUSIVE;
+            status = hasFalsePositive ? VerificationStatus.FALSE_POSITIVE : VerificationStatus.INCONCLUSIVE;
         }
 
+        Artifact effectiveArtifact = context.<Artifact>get("effectiveArtifact").orElse(null);
+
+        boolean isInClasspath = stageResults.stream()
+                .filter(r -> r.reasoning() != null)
+                .anyMatch(r -> r.reasoning().contains("runtime classpath") && r.passed());
+
+        boolean isReachable = stageResults.stream()
+                .filter(r -> r.reasoning() != null)
+                .anyMatch(r -> r.reasoning().contains("reachable from application entry points") && r.passed());
+
+        RootCausePath rootCausePath = buildRootCausePath(context, effectiveArtifact);
+
+        // ── Detect version conflicts ──
+        Map<String, Object> metadata = new HashMap<>();
+        if (effectiveArtifact != null) {
+            List<VersionConflictDetector.VersionConflict> conflicts =
+                    conflictDetector.detectConflicts(context.getEffectivePom());
+            Optional<VersionConflictDetector.VersionConflict> myConflict = conflicts.stream()
+                    .filter(c -> c.coordinate.equals(effectiveArtifact.getShortCoordinate()))
+                    .findFirst();
+
+            if (myConflict.isPresent()) {
+                metadata.put("versionConflict", Map.of(
+                        "conflictDetected", true,
+                        "conflictingPaths", myConflict.get().paths.stream()
+                                .map(VersionConflictDetector.ConflictPath::getPathString)
+                                .toList()
+                ));
+                LOG.info("Version conflict detected for {}: {}", effectiveArtifact.getShortCoordinate(),
+                        myConflict.get().conflictingVersions);
+            }
+        }
+
+        // ── Generate fixes ──
         List<FixOption> fixes = Collections.emptyList();
-
-        if (status == VerificationStatus.CONFIRMED) {
-
+        if (status == VerificationStatus.CONFIRMED && effectiveArtifact != null) {
             VerificationResult interim = VerificationResult.builder()
                     .resultId(UUID.randomUUID().toString())
                     .signalId(signal.getSignalId())
                     .originalSignal(signal)
                     .status(status)
                     .confidenceScore(confidence)
+                    .effectiveArtifact(effectiveArtifact)
+                    .rootCausePath(rootCausePath)
+                    .isInClasspath(isInClasspath)
+                    .isReachable(isReachable)
                     .build();
 
-            // validation disabled
-            fixes = fixEngine.generateFixes(interim, context.getEffectivePom(), false);
+            boolean validateFixes = context.<Boolean>get("validateFixes").orElse(false);
+            LOG.info("Calling FixEngine for signal {} (cve={}, safeVersions={})",
+                    signal.getSignalId(), signal.getCveId(), signal.getSafeVersions());
+            fixes = fixEngine.generateFixes(interim, context.getEffectivePom(), validateFixes);
+            LOG.info("FixEngine returned {} fix option(s) for {}", fixes.size(), signal.getSignalId());
         }
 
         return VerificationResult.builder()
@@ -157,23 +183,51 @@ public class VerificationPipeline {
                 .originalSignal(signal)
                 .status(status)
                 .confidenceScore(confidence)
+                .effectiveArtifact(effectiveArtifact)
+                .rootCausePath(rootCausePath)
+                .isInClasspath(isInClasspath)
+                .isReachable(isReachable)
                 .fixOptions(fixes)
                 .stageLogs(stageLogs)
+                .metadata(metadata)
                 .build();
+    }
+
+    private RootCausePath buildRootCausePath(StageContext context, Artifact effectiveArtifact) {
+        BomResolver.ResolutionResult resolution =
+                context.<BomResolver.ResolutionResult>get("resolutionResult").orElse(null);
+
+        if (resolution == null || effectiveArtifact == null) {
+            return null;
+        }
+
+        List<Artifact> path = new ArrayList<>();
+        if (resolution.isDirect() || resolution.depth() >= 0) {
+            path.add(effectiveArtifact);
+        }
+
+        return new RootCausePath(
+                path,
+                effectiveArtifact,
+                resolution.mediationRule(),
+                resolution.depth()
+        );
     }
 
     private VerificationResult buildErrorResult(VulnerabilitySignal signal,
                                                 List<String> logs,
                                                 long startTime,
                                                 Exception e) {
-
         return VerificationResult.builder()
                 .resultId(UUID.randomUUID().toString())
                 .signalId(signal.getSignalId())
                 .originalSignal(signal)
                 .status(VerificationStatus.INCONCLUSIVE)
                 .confidenceScore(new ConfidenceScore(0, Map.of(), logs))
+                .isInClasspath(false)
+                .isReachable(false)
                 .stageLogs(logs)
+                .metadata(Map.of())
                 .build();
     }
 }

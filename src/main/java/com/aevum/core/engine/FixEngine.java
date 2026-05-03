@@ -15,34 +15,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.Semaphore;
 import java.util.stream.Collectors;
 
-/**
- * Fix Engine — generates, validates, and ranks fix options for CONFIRMED vulnerabilities only.
- *
- * FIX 1: Original used `new` to construct all collaborators inside its own constructor.
- * This bypasses Spring DI entirely — none of the collaborators would be Spring-managed beans,
- * their dependencies wouldn't be injected, and ProofPackageBuilder's IOException would crash startup.
- * Now uses proper @Component constructor injection for ALL collaborators.
- *
- * FIX 2: FixRankingService was never called — FixEngine did its own ad-hoc sorting.
- * Now uses FixRankingService.rankFixes() for proper deterministic ranking.
- *
- * FIX 3: VersionConflictDetector was a @Component that was never used anywhere in the pipeline.
- * Now injected here and called during fix generation to detect and surface conflicts.
- *
- * FIX 4: The inner VerificationResult passed to generateFixes from the pipeline was built without
- * .originalSignal(signal) — meaning result.getOriginalSignal() returned null inside generateFixes.
- * The method now takes the original signal as a separate parameter for safety.
- *
- * STRICT RULES (unchanged):
- * - Never generate fixes for non-CONFIRMED vulnerabilities
- * - Never add dependencies — only version alignment, exclusion, or parent upgrade
- * - Always prefer minimum safe version (not latest)
- * - Only return validated fixes
- * - Reject all failing fixes
- */
 @Component
 public class FixEngine {
     private static final Logger LOG = LoggerFactory.getLogger(FixEngine.class);
@@ -51,14 +25,8 @@ public class FixEngine {
     private final FixValidator fixValidator;
     private final FixRankingService fixRankingService;
     private final VersionConflictDetector conflictDetector;
-
-    // Limit parallel Maven builds to avoid OOM on CI
     private static final Semaphore BUILD_SEMAPHORE = new Semaphore(4);
 
-    /**
-     * FIX: All collaborators injected by Spring. No `new` calls.
-     * ProofPackageBuilder is injected into FixValidator by Spring — no constructor IOException.
-     */
     public FixEngine(SafeVersionFinder safeVersionFinder,
                      FixValidator fixValidator,
                      FixRankingService fixRankingService,
@@ -69,137 +37,86 @@ public class FixEngine {
         this.conflictDetector = conflictDetector;
     }
 
-    /**
-     * No-arg constructor provided for tests and legacy callers that instantiate
-     * FixEngine directly. It creates basic default collaborators.
-     */
-    public FixEngine() {
-        this(new SafeVersionFinder(new com.aevum.core.engine.version.MavenMetadataClient()),
-             new FixValidator(new com.aevum.core.engine.fix.MavenBuildExecutor(),
-                 new com.aevum.core.engine.fix.TestRunner(new com.aevum.core.engine.fix.MavenBuildExecutor()),
-                 new com.aevum.core.engine.proof.ProofPackageBuilder()),
-             new FixRankingService(),
-             new VersionConflictDetector());
-    }
-
-    /**
-     * Generate, validate, and rank fix options for a confirmed vulnerability.
-     *
-     * @param result       the verified result (must be CONFIRMED)
-     * @param effectivePom the resolved POM context
-     * @return ranked list of validated fixes (empty if none pass validation)
-     */
     public List<FixOption> generateFixes(VerificationResult result, EffectivePom effectivePom, boolean validate) {
         if (result.getStatus() != VerificationStatus.CONFIRMED) {
-            LOG.info("Skipping fix generation for non-confirmed vulnerability: {}", result.getSignalId());
+            return Collections.emptyList();
+        }
+        int score = result.getConfidenceScore() != null ? result.getConfidenceScore().getTotalScore() : 0;
+        if (score < 90) {
             return Collections.emptyList();
         }
 
         Artifact vulnerable = result.getEffectiveArtifact();
         if (vulnerable == null) {
-            LOG.warn("Cannot generate fixes — no effective artifact on result: {}", result.getSignalId());
             return Collections.emptyList();
         }
 
-        LOG.info("Generating fixes for confirmed vulnerability: {} ({})",
-                result.getSignalId(), vulnerable.getCoordinate());
+        LOG.info("Generating fixes for: {} ({})", result.getSignalId(), vulnerable.getCoordinate());
 
-        // Detect version conflicts — surface in logs and attach to fixes
-        List<VersionConflictDetector.VersionConflict> conflicts = Collections.emptyList();
-        try {
-            conflicts = conflictDetector.detectConflicts(effectivePom);
-            if (!conflicts.isEmpty()) {
-                LOG.warn("Version conflicts detected — may affect fix application:");
-                conflicts.forEach(c -> LOG.warn("  CONFLICT: {}", c));
-            }
-        } catch (Exception e) {
-            LOG.warn("Conflict detection failed (non-fatal): {}", e.getMessage());
-        }
-
-        // Build candidate fixes
         List<FixOption> candidates = new ArrayList<>();
 
-        // Strategy 1: Version alignment — minimum safe version via SafeVersionFinder
+        // PRIMARY: Use signal's safeVersions directly
         buildVersionAlignmentFix(vulnerable, result, candidates);
 
-        // Strategy 2: Dependency exclusion — only for transitive dependencies
         buildExclusionFix(result, effectivePom, candidates);
-
-        // Strategy 3: Parent upgrade — only if root cause is a parent BOM
         buildParentUpgradeFix(result, effectivePom, candidates);
 
         if (candidates.isEmpty()) {
-            LOG.warn("No fix candidates generated for: {}", vulnerable.getCoordinate());
+            LOG.warn("No fix candidates for: {}", vulnerable.getCoordinate());
             return Collections.emptyList();
         }
 
-        // If validation is disabled, return candidate list (candidates already have validated=false)
-        List<FixOption> result2;
         if (!validate) {
-            result2 = candidates;
-        } else {
-            // Validate all candidates in parallel (bounded by semaphore)
-            List<FixOption> validated = validateCandidatesInParallel(candidates, result);
-
-            if (validated.isEmpty()) {
-                LOG.warn("No candidates passed validation for: {}", vulnerable.getCoordinate());
-                return Collections.emptyList();
-            }
-
-            // Rank and return
-            FixRankingService.RankedFixOptions ranked = fixRankingService.rankFixes(
-                    validated, vulnerable.getVersion());
-
-            result2 = ranked.getAllFixes();
+            return candidates;
         }
-        LOG.info("Fix generation complete: {} validated fix(es) for {}",
-                result2.size(), vulnerable.getCoordinate());
-        return result2;
+
+        List<FixOption> validated = validateCandidatesInParallel(candidates, result);
+        if (validated.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        return fixRankingService.rankFixes(validated, vulnerable.getVersion()).getAllFixes();
     }
 
-    // ── Fix Strategy Builders ──────────────────────────────────────────────────
+    // ONLY buildVersionAlignmentFix method — uses signal.getSafeVersions() directly
+    private void buildVersionAlignmentFix(Artifact vulnerable, VerificationResult result, List<FixOption> out) {
+        VulnerabilitySignal signal = result.getOriginalSignal();
+        String currentVersion = vulnerable.getVersion();
 
-    private void buildVersionAlignmentFix(Artifact vulnerable, VerificationResult result,
-                                          List<FixOption> out) {
-        try {
-            // FIX 4: originalSignal may be null if result was built without it — handle gracefully
-            String affectedRange = null;
-            if (result.getOriginalSignal() != null) {
-                // affectedRange would come from signal metadata if available
-                affectedRange = result.getOriginalSignal().getMetadata() != null
-                        ? result.getOriginalSignal().getMetadata().get("affectedRange")
-                        : null;
-            }
+        LOG.info("DEBUG FIX: signal={}, safeVersions={}, current={}",
+                signal != null ? signal.getCveId() : "null",
+                signal != null ? signal.getSafeVersions() : "null",
+                currentVersion);
 
-            var sv = safeVersionFinder.findMinimumSafe(
-                    vulnerable.getGroupId(), vulnerable.getArtifactId(),
-                    vulnerable.getVersion(), affectedRange);
-
-            if (sv.minimumSafeVersion != null
-                    && !sv.minimumSafeVersion.equals(vulnerable.getVersion())) {
-                out.add(FixOption.builder()
-                        .fixType(FixType.VERSION_ALIGNMENT)
-                        .description("Align " + vulnerable.getShortCoordinate()
-                                + " from " + vulnerable.getVersion()
-                                + " to " + sv.minimumSafeVersion + " (minimum safe version)")
-                        .targetDependency(vulnerable.getShortCoordinate())
-                        .proposedVersion(sv.minimumSafeVersion)
-                        .validated(false)
-                        .validationLog("Candidate — awaiting build+test validation")
-                        .affectedArtifacts(List.of(vulnerable.getShortCoordinate()))
-                        .build());
-            }
-        } catch (Exception e) {
-            LOG.warn("Version intelligence failed for {}: {}",
-                    vulnerable.getShortCoordinate(), e.getMessage());
+        if (signal == null || signal.getSafeVersions() == null || signal.getSafeVersions().isEmpty()) {
+            LOG.warn("No safeVersions for: {}", vulnerable.getShortCoordinate());
+            return;
         }
+
+        String minimum = signal.getSafeVersions().get(0);
+        if (minimum.equals(currentVersion)) {
+            LOG.warn("Safe version same as current: {}", currentVersion);
+            return;
+        }
+
+        out.add(FixOption.builder()
+                .fixType(FixType.VERSION_ALIGNMENT)
+                .description("Align " + vulnerable.getShortCoordinate()
+                        + " from " + currentVersion + " to " + minimum + " (minimum safe version)")
+                .targetDependency(vulnerable.getShortCoordinate())
+                .proposedVersion(minimum)
+                .validated(false)
+                .validationLog("Candidate — awaiting build+test validation")
+                .affectedArtifacts(List.of(vulnerable.getShortCoordinate()))
+                .build());
+
+        LOG.info("Added fix: {} → {}", currentVersion, minimum);
     }
 
-    private void buildExclusionFix(VerificationResult result, EffectivePom effectivePom,
-                                   List<FixOption> out) {
+    private void buildExclusionFix(VerificationResult result, EffectivePom effectivePom, List<FixOption> out) {
         RootCausePath rootCause = result.getRootCausePath();
         if (rootCause == null || rootCause.getPath().size() < 2) return;
-        if (rootCause.getDepth() == 0) return; // Direct dep — exclusion doesn't apply
+        if (rootCause.getDepth() == 0) return;
 
         Artifact sourceDep = rootCause.getPath().get(rootCause.getPath().size() - 2);
         Artifact vulnerable = result.getEffectiveArtifact();
@@ -207,19 +124,16 @@ public class FixEngine {
         out.add(FixOption.builder()
                 .fixType(FixType.DEPENDENCY_EXCLUSION)
                 .description("Exclude " + vulnerable.getShortCoordinate()
-                        + " from " + sourceDep.getShortCoordinate()
-                        + " (verify application does not depend on it directly)")
+                        + " from " + sourceDep.getShortCoordinate())
                 .targetDependency(sourceDep.getShortCoordinate())
                 .exclusionTarget(vulnerable.getShortCoordinate())
                 .validated(false)
                 .validationLog("Candidate — awaiting build+test validation")
-                .affectedArtifacts(List.of(sourceDep.getShortCoordinate(),
-                        vulnerable.getShortCoordinate()))
+                .affectedArtifacts(List.of(sourceDep.getShortCoordinate(), vulnerable.getShortCoordinate()))
                 .build());
     }
 
-    private void buildParentUpgradeFix(VerificationResult result, EffectivePom effectivePom,
-                                       List<FixOption> out) {
+    private void buildParentUpgradeFix(VerificationResult result, EffectivePom effectivePom, List<FixOption> out) {
         RootCausePath rootCause = result.getRootCausePath();
         if (rootCause == null || rootCause.getPath().isEmpty()) return;
 
@@ -228,7 +142,6 @@ public class FixEngine {
         String[] parts = currentVersion.split("\\.");
         if (parts.length < 2) return;
 
-        // Only suggest if it looks like a minor bump makes sense
         try {
             int minor = Integer.parseInt(parts[1].replaceAll("[^0-9]", ""));
             String proposedVersion = parts[0] + "." + (minor + 1) + ".0";
@@ -236,8 +149,7 @@ public class FixEngine {
             out.add(FixOption.builder()
                     .fixType(FixType.PARENT_UPGRADE)
                     .description("Upgrade " + rootDep.getShortCoordinate()
-                            + " from " + currentVersion + " to " + proposedVersion
-                            + " — transitive upgrade resolves vulnerability")
+                            + " from " + currentVersion + " to " + proposedVersion)
                     .targetDependency(rootDep.getShortCoordinate())
                     .proposedVersion(proposedVersion)
                     .validated(false)
@@ -245,20 +157,15 @@ public class FixEngine {
                     .affectedArtifacts(List.of(rootDep.getShortCoordinate()))
                     .build());
         } catch (NumberFormatException e) {
-            LOG.debug("Cannot parse version for parent upgrade: {}", currentVersion);
+            LOG.debug("Cannot parse version: {}", currentVersion);
         }
     }
 
-    // ── Validation ─────────────────────────────────────────────────────────────
-
-    private List<FixOption> validateCandidatesInParallel(List<FixOption> candidates,
-                                                         VerificationResult result) {
-        // Use virtual threads for parallel validation, bounded by semaphore
+    private List<FixOption> validateCandidatesInParallel(List<FixOption> candidates, VerificationResult result) {
         ExecutorService exec = com.aevum.core.util.Threading.newVirtualThreadPerTaskExecutor();
         try {
             List<CompletableFuture<Optional<FixOption>>> futures = candidates.stream()
-                    .map(c -> CompletableFuture.supplyAsync(
-                            () -> validateOne(c, Path.of(".")), exec))
+                    .map(c -> CompletableFuture.supplyAsync(() -> validateOne(c, Path.of(".")), exec))
                     .collect(Collectors.toList());
 
             return futures.stream()
@@ -274,8 +181,7 @@ public class FixEngine {
     private Optional<FixOption> validateOne(FixOption candidate, Path projectDir) {
         try {
             BUILD_SEMAPHORE.acquire();
-            FixValidator.FixValidationResult res =
-                    fixValidator.validateFix(projectDir, candidate, Duration.ofMinutes(5));
+            FixValidator.FixValidationResult res = fixValidator.validateFix(projectDir, candidate, Duration.ofMinutes(5));
 
             if (res.passed) {
                 String proofId = res.proofPackage != null ? res.proofPackage.getId() : "unknown";
@@ -290,15 +196,9 @@ public class FixEngine {
                         .affectedArtifacts(candidate.getAffectedArtifacts())
                         .build());
             }
-
-            LOG.info("Fix candidate FAILED validation: {} (exitCode={})",
-                    candidate.getDescription(),
-                    res.buildResult != null ? res.buildResult.exitCode : "N/A");
             return Optional.empty();
-
         } catch (Exception e) {
-            LOG.warn("Validation exception for candidate '{}': {}",
-                    candidate.getDescription(), e.getMessage());
+            LOG.warn("Validation exception: {}", e.getMessage());
             return Optional.empty();
         } finally {
             BUILD_SEMAPHORE.release();

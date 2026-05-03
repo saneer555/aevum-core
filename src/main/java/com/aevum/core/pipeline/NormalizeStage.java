@@ -8,21 +8,22 @@ import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.*;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Stage 1: Normalize input and deduplicate via SHA-256.
  *
- * FIX 1: The original used a LinkedHashMap-backed Set as instance-level state.
- *   - LinkedHashMap is NOT thread-safe (concurrent scans would corrupt it).
- *   - Instance-level state means duplicates from Scan A bleed into Scan B (wrong dedup across unrelated scans).
+ * Deduplication logic: two signals are duplicates if they refer to the SAME
+ * vulnerability in the SAME artifact at the SAME version — regardless of which
+ * scanner reported it.  A Snyk alert and a Trivy alert for the same CVE are
+ * duplicates; they should not be processed twice.
  *
- * FIX 2: Deduplication state is now stored PER SCAN in StageContext (keyed by "normalizeSeenHashes").
- *   - Each scan has its own dedup set, isolated from other concurrent scans.
- *   - The set itself is a ConcurrentHashMap.newKeySet() for thread safety within a scan.
+ * The hash is computed from: cveId|groupId|artifactId|reportedVersion
+ * scannerSource is EXCLUDED — different scanners reporting the same vuln = duplicate.
  *
- * FIX 3: clearCache() was the only way to reset state before — now unnecessary since state is per-context.
+ * State is per-scan (via StageContext) and thread-safe (ConcurrentHashMap.newKeySet).
  */
 @Component
 public class NormalizeStage implements Stage {
@@ -35,7 +36,6 @@ public class NormalizeStage implements Stage {
 
     @Override
     public StageResult execute(VulnerabilitySignal signal, StageContext context) {
-        // Get or create the per-scan dedup set stored in context
         @SuppressWarnings("unchecked")
         Set<String> seenHashes = context.<Set<String>>get(SEEN_HASHES_KEY)
                 .orElseGet(() -> {
@@ -46,12 +46,12 @@ public class NormalizeStage implements Stage {
 
         String hash = computeSha256(signal);
 
-        // add() returns false if already present — atomic on ConcurrentHashMap.KeySetView
+        // Atomic add: returns false if hash already present (duplicate)
         if (!seenHashes.add(hash)) {
-            LOG.debug("Duplicate signal detected and eliminated: {} (hash={})", signal.getSignalId(), hash);
+            LOG.debug("Duplicate signal eliminated: {} (hash={})", signal.getSignalId(), hash);
             return StageResult.fail(0,
-                "FALSE POSITIVE: Duplicate signal eliminated via SHA-256: " + hash,
-                Map.of("sha256", hash, "duplicate", true));
+                    "FALSE POSITIVE: Duplicate signal eliminated via SHA-256: " + hash,
+                    Map.of("sha256", hash, "duplicate", true));
         }
 
         LOG.debug("Signal normalized. SHA-256: {}", hash);
@@ -60,9 +60,14 @@ public class NormalizeStage implements Stage {
                 Map.of("sha256", hash, "duplicate", false));
     }
 
+    /**
+     * Compute deduplication hash.
+     *
+     * scannerSource is EXCLUDED so that the same CVE reported by different
+     * scanners (Snyk, Trivy, Black Duck) is treated as a single signal.
+     */
     private String computeSha256(VulnerabilitySignal signal) {
-        String payload = signal.getScannerSource() + "|" +
-                signal.getCveId() + "|" +
+        String payload = signal.getCveId() + "|" +
                 signal.getGroupId() + "|" +
                 signal.getArtifactId() + "|" +
                 signal.getReportedVersion();

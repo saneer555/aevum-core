@@ -45,65 +45,69 @@ public class CliRunner implements CommandLineRunner {
 
     private ScanRequest createDemoRequest() {
         return new ScanRequest(
-            "demo-project",
-            null,
-            "target",
-            List.of("com.example.Application"),
-            true,
-            List.of(
-                // CONFIRMED: Log4Shell - real vulnerability, correct version, in classpath
-                new ScanRequest.VulnerabilityInput(
-                    "snyk",
-                    "CVE-2021-44228",
-                    "org.apache.logging.log4j",
-                    "log4j-core",
-                    "2.14.1",
-                    null,
-                    List.of(),
-                    "critical",
-                    10.0,
-                    "Log4Shell RCE vulnerability"
-                ),
-                // FALSE POSITIVE: Scanner reports old version, but BOM resolved newer
-                new ScanRequest.VulnerabilityInput(
-                    "snyk",
-                    "CVE-2023-XXXX",
-                    "org.apache.tomcat.embed",
-                    "tomcat-embed-core",
-                    "9.0.50",
-                    null,
-                    List.of(),
-                    "high",
-                    7.5,
-                    "Tomcat vulnerability"
-                ),
-                // CONFIRMED: Bouncy Castle - real, in classpath, reachable
-                new ScanRequest.VulnerabilityInput(
-                    "trivy",
-                    "CVE-2024-XXXX",
-                    "org.bouncycastle",
-                    "bcprov-jdk18on",
-                    "1.80",
-                    null,
-                    List.of(),
-                    "high",
-                    8.2,
-                    "Bouncy Castle cryptographic vulnerability"
-                ),
-                // FALSE POSITIVE: Not in classpath (test scope only)
-                new ScanRequest.VulnerabilityInput(
-                    "blackduck",
-                    "CVE-2023-YYYY",
-                    "org.mockito",
-                    "mockito-core",
-                    "4.0.0",
-                    null,
-                    List.of(),
-                    "medium",
-                    5.3,
-                    "Mockito test dependency - not in production classpath"
+                "demo-project",
+                null,
+                "target",
+                List.of("com.example.Application"),
+                true,
+                List.of(
+                        // CONFIRMED: Log4Shell
+                        new ScanRequest.VulnerabilityInput(
+                                null,                           // signalId (auto-generated)
+                                "snyk",
+                                "CVE-2021-44228",
+                                "org.apache.logging.log4j",
+                                "log4j-core",
+                                "2.14.1",
+                                null,
+                                List.of(),
+                                "critical",
+                                10.0,
+                                "Log4Shell RCE vulnerability"
+                        ),
+                        // FALSE POSITIVE: Tomcat BOM mismatch
+                        new ScanRequest.VulnerabilityInput(
+                                null,
+                                "snyk",
+                                "CVE-2023-XXXX",
+                                "org.apache.tomcat.embed",
+                                "tomcat-embed-core",
+                                "9.0.50",
+                                null,
+                                List.of(),
+                                "high",
+                                7.5,
+                                "Tomcat vulnerability"
+                        ),
+                        // CONFIRMED: Bouncy Castle
+                        new ScanRequest.VulnerabilityInput(
+                                null,
+                                "trivy",
+                                "CVE-2024-XXXX",
+                                "org.bouncycastle",
+                                "bcprov-jdk18on",
+                                "1.80",
+                                null,
+                                List.of(),
+                                "high",
+                                8.2,
+                                "Bouncy Castle cryptographic vulnerability"
+                        ),
+                        // FALSE POSITIVE: Mockito test scope
+                        new ScanRequest.VulnerabilityInput(
+                                null,
+                                "blackduck",
+                                "CVE-2023-YYYY",
+                                "org.mockito",
+                                "mockito-core",
+                                "4.0.0",
+                                null,
+                                List.of(),
+                                "medium",
+                                5.3,
+                                "Mockito test dependency - not in production classpath"
+                        )
                 )
-            )
         );
     }
 

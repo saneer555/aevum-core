@@ -1,0 +1,9 @@
+{
+  "scanId": "example-uuid-1234",
+  "projectId": "my-spring-boot-app",
+  "confirmed": [
+    {
+      "cveId": "CVE-2021-44228",
+      "coordinate": "org.apache.logging.log4j:log4j-core:2.14.1",
+      "status": "CONFIRMED",
+      "confidenceScore":

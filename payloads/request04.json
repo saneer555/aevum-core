@@ -1,0 +1,69 @@
+{
+  "projectId": "my-spring-boot-app",
+  "pomContent": "<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>my-app</artifactId><version>1.0.0</version></project>",
+  "buildOutputPath": "target",
+  "entryPointClasses": ["com.example.MyApplication"],
+  "networkExposed": true,
+  "signals": [
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2021-44228",
+      "groupId": "org.apache.logging.log4j",
+      "artifactId": "log4j-core",
+      "version": "2.14.1",
+      "vulnerableRange": "[2.0,2.15.0)",
+      "safeVersions": ["2.17.1", "2.20.0"],
+      "severity": "CRITICAL",
+      "cvssScore": 10.0,
+      "description": "Log4Shell: RCE via JNDI injection in log4j-core versions < 2.15.0"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2023-BOM-MISMATCH",
+      "groupId": "org.apache.tomcat.embed",
+      "artifactId": "tomcat-embed-core",
+      "version": "9.0.50",
+      "vulnerableRange": "[9.0.0,9.0.60)",
+      "safeVersions": ["9.0.90"],
+      "severity": "HIGH",
+      "cvssScore": 7.5,
+      "description": "Tomcat vulnerability — this signal is a false positive because the project uses 9.0.90 via BOM"
+    },
+    {
+      "scannerSource": "trivy",
+      "cveId": "CVE-2022-42889",
+      "groupId": "org.apache.commons",
+      "artifactId": "commons-text",
+      "version": "1.9",
+      "vulnerableRange": "[1.0,1.10.0)",
+      "safeVersions": ["1.10.0"],
+      "severity": "CRITICAL",
+      "cvssScore": 9.8,
+      "description": "Text4Shell: RCE via StringSubstitutor interpolation in commons-text < 1.10.0"
+    },
+    {
+      "scannerSource": "blackduck",
+      "cveId": "CVE-2023-NOT-IN-PROJECT",
+      "groupId": "io.netty",
+      "artifactId": "netty-codec-http2",
+      "version": "4.1.68.Final",
+      "vulnerableRange": "[4.0.0,4.1.70.Final)",
+      "safeVersions": ["4.1.72.Final"],
+      "severity": "HIGH",
+      "cvssScore": 7.0,
+      "description": "Netty HTTP2 vulnerability — artifact not in this project's POM (Stage 2 NOT_FOUND)"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2021-44228",
+      "groupId": "org.apache.logging.log4j",
+      "artifactId": "log4j-core",
+      "version": "2.14.1",
+      "vulnerableRange": "[2.0,2.15.0)",
+      "safeVersions": ["2.17.1"],
+      "severity": "CRITICAL",
+      "cvssScore": 10.0,
+      "description": "DUPLICATE of first signal — Stage 1 should eliminate this"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "projectId": "stress-test-10-signals",
+  "pomContent": "<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>stress</artifactId><version>1.0.0</version></project>",
+  "buildOutputPath": "target",
+  "entryPointClasses": ["com.example.App"],
+  "networkExposed": true,
+  "signals": [
+    { "scannerSource": "snyk", "cveId": "CVE-2021-44228", "groupId": "org.apache.logging.log4j", "artifactId": "log4j-core", "version": "2.14.1", "vulnerableRange": "[2.0,2.15.0)", "safeVersions": ["2.17.1"], "severity": "CRITICAL", "cvssScore": 10.0, "description": "Log4Shell" },
+    { "scannerSource": "snyk", "cveId": "CVE-2022-42889", "groupId": "org.apache.commons", "artifactId": "commons-text", "version": "1.9", "vulnerableRange": "[1.0,1.10.0)", "safeVersions": ["1.10.0"], "severity": "CRITICAL", "cvssScore": 9.8, "description": "Text4Shell" },
+    { "scannerSource": "trivy", "cveId": "CVE-2022-22965", "groupId": "org.springframework.boot", "artifactId": "spring-boot", "version": "2.3.4", "vulnerableRange": "[2.0.0,2.5.0)", "safeVersions": ["2.6.0"], "severity": "CRITICAL", "cvssScore": 9.0, "description": "Spring4Shell" },
+    { "scannerSource": "snyk", "cveId": "CVE-2021-44228", "groupId": "org.apache.logging.log4j", "artifactId": "log4j-core", "version": "2.14.1", "vulnerableRange": "[2.0,2.15.0)", "safeVersions": ["2.17.1"], "severity": "CRITICAL", "cvssScore": 10.0, "description": "DUPLICATE — should be eliminated at S1" },
+    { "scannerSource": "blackduck", "cveId": "CVE-2023-NOTFOUND", "groupId": "io.netty", "artifactId": "netty-all", "version": "4.1.50.Final", "vulnerableRange": "[4.0,4.1.60.Final)", "safeVersions": [], "severity": "HIGH", "cvssScore": 7.5, "description": "NOT in project POM — expect NOT_FOUND false positive" },
+    { "scannerSource": "sonatype", "cveId": "CVE-2023-35116", "groupId": "com.fasterxml.jackson.core", "artifactId": "jackson-databind", "version": "2.9.10", "vulnerableRange": "[2.9.0,2.12.0)", "safeVersions": ["2.12.0"], "severity": "HIGH", "cvssScore": 7.5, "description": "Jackson deserialization" },
+    { "scannerSource": "snyk", "cveId": "CVE-2021-44228", "groupId": "org.apache.logging.log4j", "artifactId": "log4j-core", "version": "2.14.1", "vulnerableRange": "[2.0,2.15.0)", "safeVersions": ["2.17.1"], "severity": "CRITICAL", "cvssScore": 10.0, "description": "SECOND DUPLICATE — also eliminated" },
+    { "scannerSource": "custom", "cveId": "CVE-2024-LOWRISK", "groupId": "commons-io", "artifactId": "commons-io", "version": "2.6", "vulnerableRange": "[2.0,2.7)", "safeVersions": ["2.7"], "severity": "LOW", "cvssScore": 2.0, "description": "Low EPSS score — expect low exploitability score" },
+    { "scannerSource": "trivy", "cveId": "CVE-2021-45046", "groupId": "org.apache.logging.log4j", "artifactId": "log4j-core", "version": "2.15.0", "vulnerableRange": "[2.0,2.16.0)", "safeVersions": ["2.17.1"], "severity": "CRITICAL", "cvssScore": 9.0, "description": "Log4Shell v2 — 2.15.0 is also vulnerable" },
+    { "scannerSource": "snyk", "cveId": "CVE-2023-SAFE-VERSION", "groupId": "org.apache.tomcat.embed", "artifactId": "tomcat-embed-core", "version": "9.0.90", "vulnerableRange": "[9.0.0,9.0.80)", "safeVersions": ["9.0.90"], "severity": "MEDIUM", "cvssScore": 5.0, "description": "Version 9.0.90 is outside vulnerable range — false positive at S2" }
+  ]
+}

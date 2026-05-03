@@ -1,0 +1,33 @@
+{
+  "projectId": "demo-scan-no-build-output",
+  "pomContent": null,
+  "buildOutputPath": null,
+  "entryPointClasses": ["com.example.Application"],
+  "networkExposed": true,
+  "signals": [
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2021-44228",
+      "groupId": "org.apache.logging.log4j",
+      "artifactId": "log4j-core",
+      "version": "2.14.1",
+      "vulnerableRange": "[2.0,2.15.0)",
+      "safeVersions": ["2.17.1"],
+      "severity": "CRITICAL",
+      "cvssScore": 10.0,
+      "description": "Log4Shell — JNDI injection RCE"
+    },
+    {
+      "scannerSource": "snyk",
+      "cveId": "CVE-2023-XXXX",
+      "groupId": "org.apache.tomcat.embed",
+      "artifactId": "tomcat-embed-core",
+      "version": "9.0.50",
+      "vulnerableRange": "[9.0.0,9.0.60)",
+      "safeVersions": ["9.0.90"],
+      "severity": "HIGH",
+      "cvssScore": 7.5,
+      "description": "Tomcat false positive — BOM resolved 9.0.90"
+    }
+  ]
+}

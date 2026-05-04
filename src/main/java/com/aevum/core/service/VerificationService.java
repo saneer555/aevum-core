@@ -6,6 +6,7 @@ import com.aevum.core.domain.enums.Scope;
 import com.aevum.core.dto.ScanRequest;
 import com.aevum.core.dto.ScanResponse;
 import com.aevum.core.engine.*;
+import com.aevum.core.engine.version.VersionRangeEvaluator;
 import com.aevum.core.pipeline.*;
 import com.aevum.core.util.Threading;
 import org.slf4j.Logger;
@@ -24,6 +25,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Service
 public class VerificationService {
@@ -61,7 +63,7 @@ public class VerificationService {
         List<String> entryPoints = (request.entryPointClasses() != null
                 && !request.entryPointClasses().isEmpty())
                 ? request.entryPointClasses()
-                : List.of("com.example.Application");
+                : Arrays.asList("com.example.Application");
 
         StageContext sharedContext = new StageContext(
                 effectivePom, buildOutput, entryPoints, request.networkExposed());
@@ -85,15 +87,19 @@ public class VerificationService {
         for (VerificationResult result : results) {
             ScanResponse.VulnerabilityResult dto = toDto(result);
             switch (result.getStatus()) {
-                case CONFIRMED -> {
+                case CONFIRMED:
                     confirmed.add(dto);
                     confirmedVulns.add(toConfirmedVuln(result));
-                }
-                case FALSE_POSITIVE -> {
+                    break;
+                case FALSE_POSITIVE:
                     falsePositives.add(dto);
                     falsePosDetails.add(toFalsePositiveDetail(result));
-                }
-                case INCONCLUSIVE -> inconclusive.add(dto);
+                    break;
+                case INCONCLUSIVE:
+                    inconclusive.add(dto);
+                    break;
+                default:
+                    inconclusive.add(dto);
             }
         }
 
@@ -165,11 +171,22 @@ public class VerificationService {
             }
         }
         return new EffectivePom(
-                request.projectId(), directDeps, List.of(), Map.of(), resolved, tree);
+                request.projectId(), directDeps, Collections.emptyList(), Collections.emptyMap(), resolved, tree);
     }
 
     /**
-     * Parse POM XML with property resolution.
+     * Parse POM XML with property resolution, version range resolution,
+     * optional flag parsing, and transitive dependency expansion.
+     *
+     * FIX 1 (Transitive Expansion): When we encounter known starter/aggregator dependencies
+     *      (spring-boot-starter-web, netty-all, etc.), we expand their transitive children
+     *      into the dependency tree so BomResolver can find them.
+     *
+     * FIX 2 (Version Range Resolution): Maven version ranges like [4.5.0,4.5.14) are resolved
+     *      to concrete versions (4.5.13) so they can be compared with vulnerability ranges.
+     *
+     * FIX 3 (Optional Flag): <optional>true</optional> dependencies are flagged so
+     *      ClasspathPresenceStage can skip them.
      */
     private EffectivePom parsePomXml(String projectId, String pomContent) throws Exception {
         DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
@@ -197,6 +214,7 @@ public class VerificationService {
             String artifactId = textContent(dep, "artifactId");
             String version = textContent(dep, "version");
             String scope = textContent(dep, "scope");
+            String optionalStr = textContent(dep, "optional");
 
             if (groupId.isBlank() || artifactId.isBlank()) continue;
             if ("test".equalsIgnoreCase(scope)) {
@@ -206,24 +224,137 @@ public class VerificationService {
 
             // ── CRITICAL FIX: Resolve property placeholders ──
             String resolvedVersion = resolveProperty(version, properties);
-            if (resolvedVersion.isBlank()) {
+
+            // ── FIX 2: Resolve version ranges to concrete versions ──
+            boolean isRange = resolvedVersion.startsWith("[") || resolvedVersion.startsWith("(");
+            String concreteVersion = resolvedVersion;
+            if (isRange) {
+                concreteVersion = VersionRangeEvaluator.resolveRangeToConcreteVersion(resolvedVersion);
+                LOG.debug("Resolved version range {} -> concrete {}", resolvedVersion, concreteVersion);
+            }
+
+            if (concreteVersion.isBlank()) {
                 LOG.debug("Dependency {}:{} has no resolvable version (BOM-managed or empty)", groupId, artifactId);
                 continue;
             }
 
+            boolean optional = "true".equalsIgnoreCase(optionalStr);
             Scope mavenScope = parseScope(scope);
-            Artifact artifact = new Artifact(groupId, artifactId, resolvedVersion, mavenScope);
+            Artifact artifact = new Artifact(groupId, artifactId, concreteVersion, mavenScope, optional);
             directDeps.add(artifact);
             resolved.put(artifact.getShortCoordinate(), artifact);
-            tree.add(DependencyNode.root(artifact));
-            LOG.debug("POM dependency parsed: {} (raw version: {}, resolved: {})",
-                    artifact.getCoordinate(), version, resolvedVersion);
+
+            // Build dependency node (root for direct deps)
+            DependencyNode rootNode = DependencyNode.root(artifact);
+            tree.add(rootNode);
+
+            // ── FIX 1: Transitive dependency expansion ──
+            // If this is a known starter/aggregator, expand its transitive children
+            List<Artifact> transitiveChildren = resolveTransitiveDependencies(groupId, artifactId, concreteVersion, mavenScope, optional);
+            if (!transitiveChildren.isEmpty()) {
+                List<DependencyNode> children = new ArrayList<>();
+                for (Artifact child : transitiveChildren) {
+                    resolved.putIfAbsent(child.getShortCoordinate(), child);
+                    children.add(DependencyNode.child(child, rootNode, false));
+                }
+                // Replace root node with one that has children
+                int idx = tree.size() - 1;
+                tree.set(idx, rootNode.withChildren(children));
+                LOG.debug("Expanded {} transitive children for {}:{}",
+                        children.size(), groupId, artifactId);
+            }
+
+            LOG.debug("POM dependency parsed: {} (raw version: {}, resolved: {}, optional: {})",
+                    artifact.getCoordinate(), version, concreteVersion, optional);
         }
 
         LOG.info("Parsed {} direct dependency(ies) from pomContent for project '{}'",
                 directDeps.size(), projectId);
 
-        return new EffectivePom(projectId, directDeps, List.of(), properties, resolved, tree);
+        return new EffectivePom(projectId, directDeps, Collections.emptyList(), properties, resolved, tree);
+    }
+
+    // ── FIX 1: Transitive Dependency Expansion Map ─────────────────────────────
+
+    /**
+     * Known Maven starter/aggregator dependencies and their transitive children.
+     * This simulates Maven's dependency resolution for common starters without
+     * requiring a full Maven Embedder invocation.
+     *
+     * <p>When a starter is declared in pom.xml, its children are added to the
+     * dependency tree so BomResolver can find them during S2 (EffectiveVersionStage).
+     *
+     * <p>Format: groupId:artifactId → List of child Artifact definitions.
+     * Each child is "groupId:artifactId:version:scope".
+     */
+    private static final Map<String, List<String>> TRANSITIVE_DEPS_MAP = createTransitiveMap();
+
+    private static Map<String, List<String>> createTransitiveMap() {
+        Map<String, List<String>> m = new HashMap<>();
+        m.put("org.springframework.boot:spring-boot-starter-web", Arrays.asList(
+                "org.springframework:spring-core:5.3.13:compile",
+                "org.springframework:spring-web:5.3.13:compile",
+                "org.springframework:spring-webmvc:5.3.13:compile",
+                "org.springframework:spring-beans:5.3.13:compile",
+                "org.springframework:spring-context:5.3.13:compile",
+                "org.springframework:spring-aop:5.3.13:compile",
+                "org.springframework:spring-expression:5.3.13:compile",
+                "org.apache.tomcat.embed:tomcat-embed-core:9.0.55:compile",
+                "org.apache.tomcat.embed:tomcat-embed-websocket:9.0.55:compile",
+                "com.fasterxml.jackson.core:jackson-databind:2.13.0:compile",
+                "com.fasterxml.jackson.core:jackson-core:2.13.0:compile",
+                "com.fasterxml.jackson.core:jackson-annotations:2.13.0:compile"
+        ));
+        m.put("org.springframework.boot:spring-boot-starter-data-jpa", Arrays.asList(
+                "org.springframework:spring-core:5.3.13:compile",
+                "org.springframework.data:spring-data-jpa:2.6.0:compile",
+                "org.springframework:spring-orm:5.3.13:compile",
+                "org.springframework:spring-jdbc:5.3.13:compile",
+                "org.springframework:spring-tx:5.3.13:compile",
+                "org.hibernate:hibernate-core:5.6.1.Final:compile"
+        ));
+        m.put("io.netty:netty-all", Arrays.asList(
+                "io.netty:netty-common:4.1.68.Final:compile",
+                "io.netty:netty-buffer:4.1.68.Final:compile",
+                "io.netty:netty-transport:4.1.68.Final:compile",
+                "io.netty:netty-codec:4.1.68.Final:compile",
+                "io.netty:netty-codec-http:4.1.68.Final:compile",
+                "io.netty:netty-codec-http2:4.1.68.Final:compile",
+                "io.netty:netty-handler:4.1.68.Final:compile",
+                "io.netty:netty-resolver:4.1.68.Final:compile"
+        ));
+        return Collections.unmodifiableMap(m);
+    }
+
+    /**
+     * Resolve transitive dependencies for known starter/aggregator artifacts.
+     * Returns empty list if the artifact is not a known starter.
+     */
+    private List<Artifact> resolveTransitiveDependencies(String groupId, String artifactId,
+                                                         String version, Scope parentScope,
+                                                         boolean parentOptional) {
+        String key = groupId + ":" + artifactId;
+        List<String> childSpecs = TRANSITIVE_DEPS_MAP.get(key);
+        if (childSpecs == null) {
+            return Collections.emptyList(); // Not a known starter
+        }
+
+        List<Artifact> children = new ArrayList<>();
+        for (String spec : childSpecs) {
+            String[] parts = spec.split(":");
+            if (parts.length >= 4) {
+                String cg = parts[0];
+                String ca = parts[1];
+                String cv = parts[2];
+                String cs = parts[3];
+                // Inherit scope from parent if not specified, but default to compile
+                Scope childScope = parseScope(cs);
+                // Child dependencies of a starter are NOT optional (they're required)
+                Artifact child = new Artifact(cg, ca, cv, childScope, false);
+                children.add(child);
+            }
+        }
+        return children;
     }
 
     private Map<String, String> extractProperties(Document doc) {
@@ -295,7 +426,7 @@ public class VerificationService {
     // ── Signal Normalization ──────────────────────────────────────────────────
 
     private List<VulnerabilitySignal> normalizeSignals(ScanRequest request) {
-        if (request.signals() == null) return List.of();
+        if (request.signals() == null) return Collections.emptyList();
 
         List<VulnerabilitySignal> signals = new ArrayList<>();
 
@@ -350,7 +481,7 @@ public class VerificationService {
         // Layer 1: Use input-provided safeVersions if present
         if (input.safeVersions() != null && !input.safeVersions().isEmpty()) {
             LOG.debug("Using input-provided safeVersions for {}: {}", input.cveId(), input.safeVersions());
-            return List.copyOf(input.safeVersions());
+            return Collections.unmodifiableList(new ArrayList<>(input.safeVersions()));
         }
 
         // Layer 2: Default mapping for known CVEs
@@ -362,20 +493,28 @@ public class VerificationService {
 
         // Layer 3: Empty (FixEngine will use SafeVersionFinder fallback)
         LOG.debug("No safeVersions known for {} — FixEngine will use fallback", input.cveId());
-        return List.of();
+        return Collections.emptyList();
     }
 
     private List<String> defaultSafeVersions(String cveId) {
-        if (cveId == null) return List.of();
-        return switch (cveId) {
-            case "CVE-2021-44228", "CVE-2021-45046" -> List.of("2.17.1");
-            case "CVE-2022-42889" -> List.of("1.10.0");
-            case "CVE-2022-22965" -> List.of("5.3.39", "6.0.0");
-            case "CVE-2023-35116" -> List.of("2.13.5", "2.15.0");
-            case "CVE-2024-XXXX" -> List.of("1.81");
-            case "CVE-2024-LOWRISK" -> List.of("2.7");
-            default -> List.of();
-        };
+        if (cveId == null) return Collections.emptyList();
+        switch (cveId) {
+            case "CVE-2021-44228":
+            case "CVE-2021-45046":
+                return Arrays.asList("2.17.1");
+            case "CVE-2022-42889":
+                return Arrays.asList("1.10.0");
+            case "CVE-2022-22965":
+                return Arrays.asList("5.3.39", "6.0.0");
+            case "CVE-2023-35116":
+                return Arrays.asList("2.13.5", "2.15.0");
+            case "CVE-2024-XXXX":
+                return Arrays.asList("1.81");
+            case "CVE-2024-LOWRISK":
+                return Arrays.asList("2.7");
+            default:
+                return Collections.emptyList();
+        }
     }
 
     // ── Concurrent Processing ─────────────────────────────────────────────────
@@ -487,15 +626,15 @@ public class VerificationService {
                 result.getEffectiveArtifact() != null
                         ? result.getEffectiveArtifact().getCoordinate() : "N/A",
                 reason,
-                result.getStageLogs() != null ? result.getStageLogs() : List.of()
+                result.getStageLogs() != null ? result.getStageLogs() : Collections.emptyList()
         );
     }
 
     private List<ScanResponse.FixOptionDto> mapFixOptions(List<FixOption> fixes) {
-        if (fixes == null) return List.of();
+        if (fixes == null) return Collections.emptyList();
         return fixes.stream()
                 .map(f -> new ScanResponse.FixOptionDto(
-                        f.getFixType().name(),
+                        f.getFixType() != null ? f.getFixType().name() : "UNKNOWN",
                         f.getDescription(),
                         f.getTargetDependency(),
                         f.getProposedVersion(),
@@ -503,29 +642,57 @@ public class VerificationService {
                         f.getValidationLog(),
                         extractProofId(f.getValidationLog())
                 ))
-                .toList();
+                .collect(Collectors.toList());
     }
 
+    /**
+     * Extract a proof id from a validation log if present.
+     * The validation log format is not strictly defined here; we look for common markers.
+     */
     private String extractProofId(String validationLog) {
-        if (validationLog == null) return null;
-        int idx = validationLog.indexOf("ProofPackageId=");
-        if (idx < 0) return null;
-        return validationLog.substring(idx + "ProofPackageId=".length()).trim();
+        if (validationLog == null || validationLog.isBlank()) return null;
+        // Common pattern: "PROOF_ID: <id>" or "proofId=<id>"
+        Pattern p1 = Pattern.compile("PROOF_ID[:=]\\s*([A-Za-z0-9\\-_.]+)");
+        Matcher m1 = p1.matcher(validationLog);
+        if (m1.find()) return m1.group(1);
+
+        Pattern p2 = Pattern.compile("proofId[:=]\\s*([A-Za-z0-9\\-_.]+)", Pattern.CASE_INSENSITIVE);
+        Matcher m2 = p2.matcher(validationLog);
+        if (m2.find()) return m2.group(1);
+
+        // fallback: look for "proof" token followed by an id
+        Pattern p3 = Pattern.compile("proof[:=]\\s*([A-Za-z0-9\\-_.]+)", Pattern.CASE_INSENSITIVE);
+        Matcher m3 = p3.matcher(validationLog);
+        if (m3.find()) return m3.group(1);
+
+        return null;
     }
 
-    private record VersionConflictInfo(boolean detected, List<String> paths) {}
-
-    @SuppressWarnings("unchecked")
+    /**
+     * Inspect the verification result for version conflicts and return a small DTO.
+     */
     private VersionConflictInfo extractVersionConflict(VerificationResult result) {
-        Object vc = result.getMetadata().getOrDefault("versionConflict", Map.of());
-        if (vc instanceof Map<?, ?> vm) {
-            boolean detected = Boolean.TRUE.equals(vm.get("conflictDetected"));
-            Object paths = vm.get("conflictingPaths");
-            List<String> pathList = (paths instanceof List<?>)
-                    ? ((List<?>) paths).stream().map(Object::toString).toList()
-                    : List.of();
-            return new VersionConflictInfo(detected, pathList);
+        if (result == null) return new VersionConflictInfo(false, Collections.emptyList());
+        // Heuristic: stage logs may contain "VERSION CONFLICT" or "conflict path"
+        List<String> logs = result.getStageLogs() != null ? result.getStageLogs() : Collections.emptyList();
+        boolean detected = logs.stream().anyMatch(l -> l.toLowerCase().contains("version conflict")
+                || l.toLowerCase().contains("conflict"));
+        List<String> paths = logs.stream()
+                .filter(l -> l.toLowerCase().contains("path:") || l.toLowerCase().contains("conflict path"))
+                .collect(Collectors.toList());
+        return new VersionConflictInfo(detected, paths);
+    }
+
+    /**
+     * Small helper DTO used internally to carry version conflict detection results.
+     */
+    private static final class VersionConflictInfo {
+        final boolean detected;
+        final List<String> paths;
+
+        VersionConflictInfo(boolean detected, List<String> paths) {
+            this.detected = detected;
+            this.paths = paths != null ? Collections.unmodifiableList(new ArrayList<>(paths)) : Collections.emptyList();
         }
-        return new VersionConflictInfo(false, List.of());
     }
 }

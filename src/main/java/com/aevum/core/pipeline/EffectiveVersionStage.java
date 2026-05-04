@@ -1,6 +1,7 @@
 package com.aevum.core.pipeline;
 
 import com.aevum.core.domain.model.*;
+import com.aevum.core.domain.enums.Scope;
 import com.aevum.core.engine.BomResolver;
 import com.aevum.core.engine.version.VersionRangeEvaluator;
 import org.slf4j.Logger;
@@ -12,6 +13,10 @@ import java.util.*;
 /**
  * Stage 2: Effective Version Check via BOM resolution.
  * 85% of false positives are eliminated here.
+ *
+ * FIX: Added early elimination for PROVIDED and OPTIONAL artifacts.
+ *      These are not runtime dependencies, so they should be marked FP at S2
+ *      before reaching S3 (ClasspathPresenceStage).
  */
 @Component
 public class EffectiveVersionStage implements Stage {
@@ -30,13 +35,13 @@ public class EffectiveVersionStage implements Stage {
         EffectivePom effectivePom = context.getEffectivePom();
 
         BomResolver.ResolutionResult result = bomResolver.resolveEffectiveVersion(
-            signal.getGroupId(), signal.getArtifactId(), effectivePom);
+                signal.getGroupId(), signal.getArtifactId(), effectivePom);
 
         if (!result.isFound()) {
             String reason = "FALSE POSITIVE: Artifact not found in resolved dependency tree: " + signal.getShortCoordinate();
             LOG.info(reason);
             return StageResult.fail(0, reason,
-                Map.of("resolution", "NOT_FOUND"));
+                    Map.of("resolution", "NOT_FOUND"));
         }
 
         Artifact effective = result.resolvedArtifact();
@@ -45,53 +50,82 @@ public class EffectiveVersionStage implements Stage {
         String affectedRange = signal.getMetadata() != null ? signal.getMetadata().get("affectedRange") : null;
 
         LOG.debug("Reported version: {}, Effective version: {} (rule: {})",
-                 reportedVersion, effectiveVersion, result.mediationRule());
+                reportedVersion, effectiveVersion, result.mediationRule());
+
+        // ── FIX: Early elimination for PROVIDED scope ──
+        if (effective.getScope() == Scope.PROVIDED) {
+            String reason = "FALSE POSITIVE: " + effective.getCoordinate() +
+                    " has scope=PROVIDED — not included in runtime classpath";
+            LOG.info(reason);
+            return StageResult.fail(0, reason,
+                    Map.of(
+                            "reportedVersion", reportedVersion,
+                            "effectiveVersion", effectiveVersion,
+                            "mediationRule", result.mediationRule(),
+                            "scope", "PROVIDED"
+                    ));
+        }
+
+        // ── FIX: Early elimination for OPTIONAL dependencies ──
+        if (effective.isOptional()) {
+            String reason = "FALSE POSITIVE: " + effective.getCoordinate() +
+                    " is <optional>true</optional> — not transitive, not in runtime classpath";
+            LOG.info(reason);
+            return StageResult.fail(0, reason,
+                    Map.of(
+                            "reportedVersion", reportedVersion,
+                            "effectiveVersion", effectiveVersion,
+                            "mediationRule", result.mediationRule(),
+                            "optional", true
+                    ));
+        }
 
         // Store for later stages
         context.put("effectiveArtifact", effective);
         context.put("resolutionResult", result);
+
         // If the scanner provided an affected range, ensure the resolved/effective
         // version falls inside that range. If it does not, this is a false positive.
         if (affectedRange != null && !affectedRange.isBlank()) {
             boolean inRange = VersionRangeEvaluator.isVersionInRange(effectiveVersion, affectedRange);
             if (!inRange) {
                 String reason = String.format(
-                    "FALSE POSITIVE: Effective version %s is NOT in vulnerable range %s (reported was %s)",
-                    effectiveVersion, affectedRange, reportedVersion);
+                        "FALSE POSITIVE: Effective version %s is NOT in vulnerable range %s (reported was %s)",
+                        effectiveVersion, affectedRange, reportedVersion);
                 LOG.info(reason);
                 return StageResult.fail(0, reason,
-                    Map.of(
-                        "reportedVersion", reportedVersion,
-                        "effectiveVersion", effectiveVersion,
-                        "affectedRange", affectedRange,
-                        "mediationRule", result.mediationRule(),
-                        "resolutionTrace", result.trace()
-                    ));
+                        Map.of(
+                                "reportedVersion", reportedVersion,
+                                "effectiveVersion", effectiveVersion,
+                                "affectedRange", affectedRange,
+                                "mediationRule", result.mediationRule(),
+                                "resolutionTrace", result.trace()
+                        ));
             }
         } else {
             // Fallback behavior: if no range was supplied, require reported==effective
             if (!reportedVersion.equals(effectiveVersion)) {
                 String reason = String.format(
-                    "FALSE POSITIVE: Scanner reported %s but Maven resolved %s via %s. " +
-                    "The vulnerable version is NOT on the runtime classpath.",
-                    reportedVersion, effectiveVersion, result.mediationRule());
+                        "FALSE POSITIVE: Scanner reported %s but Maven resolved %s via %s. " +
+                                "The vulnerable version is NOT on the runtime classpath.",
+                        reportedVersion, effectiveVersion, result.mediationRule());
                 LOG.info(reason);
                 return StageResult.fail(0, reason,
-                    Map.of(
-                        "reportedVersion", reportedVersion,
-                        "effectiveVersion", effectiveVersion,
-                        "mediationRule", result.mediationRule(),
-                        "resolutionTrace", result.trace()
-                    ));
+                        Map.of(
+                                "reportedVersion", reportedVersion,
+                                "effectiveVersion", effectiveVersion,
+                                "mediationRule", result.mediationRule(),
+                                "resolutionTrace", result.trace()
+                        ));
             }
         }
 
         return StageResult.pass(95, "Effective version validated: " + effectiveVersion,
-            Map.of(
-                "effectiveVersion", effectiveVersion,
-                "mediationRule", result.mediationRule(),
-                "depth", result.depth(),
-                "isDirect", result.isDirect()
-            ));
+                Map.of(
+                        "effectiveVersion", effectiveVersion,
+                        "mediationRule", result.mediationRule(),
+                        "depth", result.depth(),
+                        "isDirect", result.isDirect()
+                ));
     }
 }

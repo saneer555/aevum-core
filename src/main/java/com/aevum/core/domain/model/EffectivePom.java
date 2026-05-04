@@ -1,9 +1,13 @@
 package com.aevum.core.domain.model;
 
+import com.aevum.core.domain.enums.Scope;
 import java.util.*;
 
 /**
  * Represents the fully resolved effective POM after BOM resolution.
+ *
+ * FIX: Added {@code isRuntimeArtifact()} helper to filter out PROVIDED, TEST, and optional
+ *      dependencies. These should not be checked for classpath presence.
  */
 public final class EffectivePom {
     private final String projectId;
@@ -40,5 +44,18 @@ public final class EffectivePom {
 
     public boolean hasArtifact(String groupId, String artifactId) {
         return resolvedDependencies.containsKey(groupId + ":" + artifactId);
+    }
+
+    /**
+     * Returns true if the artifact is a runtime dependency (not provided, test, or optional).
+     * Used by ClasspathPresenceStage to skip non-runtime artifacts.
+     */
+    public boolean isRuntimeArtifact(String groupId, String artifactId) {
+        Artifact artifact = resolvedDependencies.get(groupId + ":" + artifactId);
+        if (artifact == null) return false;
+        if (artifact.getScope() == Scope.PROVIDED) return false;
+        if (artifact.getScope() == Scope.TEST) return false;
+        if (artifact.isOptional()) return false;
+        return true;
     }
 }

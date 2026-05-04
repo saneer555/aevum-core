@@ -1,6 +1,7 @@
 package com.aevum.core.pipeline;
 
 import com.aevum.core.domain.model.*;
+import com.aevum.core.domain.enums.Scope;
 import com.aevum.core.engine.ClasspathVerifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -11,6 +12,10 @@ import java.util.*;
 /**
  * Stage 3: Classpath Presence Verification.
  * Even if version matches, is it on the RUNTIME classpath?
+ *
+ * FIX: Added scope/optional filtering. Artifacts with scope PROVIDED, TEST, or optional=true
+ *      are immediately marked as FALSE POSITIVE at S2 level (not runtime dependencies).
+ *      This prevents javax.servlet-api (provided) and lombok (optional) from reaching S3.
  */
 @Component
 public class ClasspathPresenceStage implements Stage {
@@ -27,7 +32,35 @@ public class ClasspathPresenceStage implements Stage {
     @Override
     public StageResult execute(VulnerabilitySignal signal, StageContext context) {
         Artifact effective = context.<Artifact>get("effectiveArtifact")
-            .orElseThrow(() -> new IllegalStateException("Effective artifact not set in context"));
+                .orElseThrow(() -> new IllegalStateException("Effective artifact not set in context"));
+
+        // ── FIX: Skip non-runtime artifacts (provided, test, optional) ──
+        Scope scope = effective.getScope();
+        boolean optional = effective.isOptional();
+
+        if (scope == Scope.PROVIDED) {
+            String reason = "FALSE POSITIVE: " + effective.getCoordinate() +
+                    " has scope=PROVIDED — not included in runtime classpath";
+            LOG.info(reason);
+            return StageResult.fail(0, reason,
+                    Map.of("scope", "PROVIDED", "location", "NONE", "path", ""));
+        }
+
+        if (scope == Scope.TEST) {
+            String reason = "FALSE POSITIVE: " + effective.getCoordinate() +
+                    " has scope=TEST — not included in runtime classpath";
+            LOG.info(reason);
+            return StageResult.fail(0, reason,
+                    Map.of("scope", "TEST", "location", "NONE", "path", ""));
+        }
+
+        if (optional) {
+            String reason = "FALSE POSITIVE: " + effective.getCoordinate() +
+                    " is marked <optional>true</optional> — not transitive, not in runtime classpath";
+            LOG.info(reason);
+            return StageResult.fail(0, reason,
+                    Map.of("optional", true, "location", "NONE", "path", ""));
+        }
 
         var result = classpathVerifier.verifyClasspathPresence(effective, context.getBuildOutput());
 
@@ -40,18 +73,18 @@ public class ClasspathPresenceStage implements Stage {
             if (allowFallback && resolvedInPom) {
                 LOG.debug("Fallback: artifact {} considered present because it is resolved in EffectivePom", effective.getCoordinate());
                 return StageResult.pass(90, "Artifact presumed present (resolved in EffectivePom): " + effective.getCoordinate(),
-                    Map.of("location", "EFFECTIVE_POM", "path", "<resolved>") );
+                        Map.of("location", "EFFECTIVE_POM", "path", "<resolved>") );
             }
 
             String reason = "FALSE POSITIVE: " + effective.getCoordinate() +
-                           " resolved by BOM but NOT present in runtime classpath (" + result.reason() + ")";
+                    " resolved by BOM but NOT present in runtime classpath (" + result.reason() + ")";
             LOG.info(reason);
             return StageResult.fail(0, reason,
-                Map.of("location", result.location(), "path", result.path()));
+                    Map.of("location", result.location(), "path", result.path()));
         }
 
         LOG.debug("Artifact confirmed in classpath: {} at {}", effective.getCoordinate(), result.location());
         return StageResult.pass(90, "Artifact confirmed in runtime classpath at: " + result.location(),
-            Map.of("location", result.location(), "path", result.path()));
+                Map.of("location", result.location(), "path", result.path()));
     }
 }
